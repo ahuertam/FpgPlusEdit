@@ -1,0 +1,13 @@
+[package]
+name = "div2serve"
+description = "Editor local (servidor + interfaz web) para los recursos gráficos de DIV Games Studio 2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fpgplusedit"
+path = "src/main.rs"
+
+[dependencies]
+div2fmt = { path = "../div2fmt" }

@@ -1,0 +1,23 @@
+[package]
+name = "div2fpg"
+description = "CLI para manipular ficheros FPG/MAP/PAL/FNT de DIV Games Studio 2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "div2fpg"
+path = "src/main.rs"
+
+[dependencies]
+div2fmt = { path = "../div2fmt" }
+# Sin la feature "color" para no arrastrar anstream/anstyle-wincon/windows-sys,
+# que requieren dlltool (no disponible en esta toolchain GNU).
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }

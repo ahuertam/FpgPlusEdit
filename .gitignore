@@ -1,0 +1,11 @@
+/target
+*.exe
+*.pdb
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.log
+*.tmp
+*.bak
+*.orig

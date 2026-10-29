@@ -1,0 +1,12 @@
+[package]
+name = "div2fmt"
+description = "Núcleo de lectura/escritura de los formatos de DIV Games Studio 2 (FPG, MAP, PAL, FNT)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2 = "1"
+png = "0.17"
+jpeg-encoder = "0.6"
+jpeg-decoder = { version = "0.3", default-features = false }
