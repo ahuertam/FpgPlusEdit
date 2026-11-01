@@ -270,6 +270,22 @@ fn doc_response(id: u64) -> Resp {
     }
 }
 
+/// Igual que `doc_response`, pero añade un campo extra justo después de «ok».
+///
+/// Lo usa la importación para devolver el estado completo del FPG **y** el id
+/// del mapa recién añadido, de modo que el cliente no tenga que recargar el
+/// fichero desde disco (lo que perdería el mapa, que aún no se ha guardado).
+fn doc_response_extra(id: u64, extra: &str) -> Resp {
+    let g = store().lock().unwrap();
+    match g.get(&id) {
+        Some(doc) => {
+            let j = doc_json(id, doc);
+            Resp::json(200, j.replacen("\"ok\":true,", &format!("\"ok\":true,{extra},"), 1))
+        }
+        None => Resp::err(404, "documento no encontrado (¿se cerró la pestaña?)"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // enrutado
 // ---------------------------------------------------------------------------
@@ -279,10 +295,15 @@ pub fn route(req: &Request, home: &Path) -> Resp {
         "/api/state" => state(home),
         "/api/fs" => fs_list(req),
         "/api/open" | "/api/reload" => open(req),
+        "/api/drop" => drop_file(req, home),
         "/api/new" => new_file(req),
         "/api/save" => save(req),
         "/api/image" => image(req),
         "/api/glyph" => glyph(req),
+        "/api/pixels" => pixels(req),
+        "/api/map" => map_meta(req),
+        "/api/points" => points(req),
+        "/api/move" => move_map(req),
         "/api/palette" => set_palette(req),
         "/api/import" => import(req),
         "/api/remove" => remove(req),
@@ -422,6 +443,64 @@ fn open(req: &Request) -> Resp {
     };
     match load_doc(Path::new(&path)) {
         Ok(id) => doc_response(id),
+        Err(e) => Resp::err(400, &e),
+    }
+}
+
+/// Carpeta donde se copian los ficheros soltados sobre la ventana.
+///
+/// Se prefiere el directorio temporal del sistema; si está en un volumen sin
+/// espacio (habitual cuando el disco del sistema va al límite) se usa una
+/// subcarpeta junto a la aplicación, que puede estar en otra unidad.
+fn drop_dir(home: &Path) -> PathBuf {
+    let sys = std::env::temp_dir().join("FPGPlusEdit");
+    if std::fs::create_dir_all(&sys).is_ok() {
+        // El sondeo reserva 1 MiB: un disco casi lleno deja pasar unos pocos
+        // bytes y luego falla a mitad de la copia, que es lo que hay que evitar.
+        let probe = sys.join(".probe");
+        if std::fs::write(&probe, vec![0u8; 1024 * 1024]).is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            return sys;
+        }
+        let _ = std::fs::remove_file(&probe);
+    }
+    let alt = home.join(".fpgplusedit-drops");
+    let _ = std::fs::create_dir_all(&alt);
+    alt
+}
+
+/// Abre el fichero que el navegador ha soltado sobre la ventana.
+///
+/// El navegador no revela la ruta original de un fichero arrastrado, solo su
+/// contenido; así que este llega en el cuerpo de la petición y se copia a una
+/// carpeta temporal, que es la que se abre. El cliente marca el documento como
+/// «copia» (`dropped`), de modo que el primer guardado pida destino real.
+fn drop_file(req: &Request, home: &Path) -> Resp {
+    let name = match q(req, "name") {
+        Some(n) => n,
+        None => return Resp::err(400, "falta el parámetro name"),
+    };
+    if req.body.is_empty() {
+        return Resp::err(400, "la petición no trae ningún fichero");
+    }
+    // Solo se conserva el nombre, nunca la ruta: así una cabecera mal formada
+    // no puede hacer que se escriba fuera de la carpeta temporal.
+    let safe: String = Path::new(name)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        return Resp::err(400, "nombre de fichero no válido");
+    }
+
+    let dir = drop_dir(home);
+    let path = dir.join(&safe);
+    if let Err(e) = std::fs::write(&path, &req.body) {
+        return Resp::err(500, &format!("no se puede escribir {}: {e}", path.display()));
+    }
+
+    match load_doc(&path) {
+        Ok(id) => doc_response_extra(id, "\"dropped\":true"),
         Err(e) => Resp::err(400, &e),
     }
 }
@@ -638,7 +717,11 @@ fn import(req: &Request) -> Resp {
     m.set_name(&name.unwrap_or_else(|| format!("Mapa {code}")));
     m.set_filename(&base_name(&img_path));
     fpg.maps.push(m);
-    Resp::json(200, format!("{{\"ok\":true,\"id\":{code}}}"))
+    drop(g);
+
+    // Se devuelve el documento entero: el mapa vive en memoria hasta que se
+    // guarde, así que recargarlo desde disco lo haría desaparecer.
+    doc_response_extra(id, &format!("\"new_id\":{code}"))
 }
 
 fn remove(req: &Request) -> Resp {
@@ -690,6 +773,458 @@ fn rename(req: &Request) -> Resp {
         m.set_filename(f);
     }
     Resp::ok()
+}
+
+fn map_meta(req: &Request) -> Resp {
+    let id = match needs_doc(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let code = match qnum::<u32>(req, "id") {
+        Some(c) => c,
+        None => return Resp::err(400, "falta el parámetro id"),
+    };
+    let new_id = qnum::<u32>(req, "new_id");
+    let name = q(req, "name");
+    let filename = q(req, "filename");
+
+    let mut g = store().lock().unwrap();
+    let fpg = match g.get_mut(&id) {
+        Some(Doc::Fpg { fpg, .. }) => fpg,
+        Some(_) => return Resp::err(400, "solo se pueden editar mapas de un FPG"),
+        None => return Resp::err(404, "documento no encontrado"),
+    };
+
+    let pos = match fpg.maps.iter().position(|m| m.code == code) {
+        Some(i) => i,
+        None => return Resp::err(404, &format!("no existe el mapa {code}")),
+    };
+
+    if let Some(next) = new_id {
+        if next == 0 {
+            return Resp::err(400, "el id debe ser mayor que cero");
+        }
+        if next != code && fpg.maps.iter().any(|m| m.code == next) {
+            return Resp::err(400, &format!("ya existe un mapa con el id {next}"));
+        }
+        fpg.maps[pos].code = next;
+    }
+    if let Some(v) = name {
+        fpg.maps[pos].set_name(v);
+    }
+    if let Some(v) = filename {
+        fpg.maps[pos].set_filename(v);
+    }
+
+    drop(g);
+    doc_response(id)
+}
+
+fn points(req: &Request) -> Resp {
+    let id = match needs_doc(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let want = qnum::<u32>(req, "id");
+    let pts = q(req, "pts");
+    let count = qnum::<usize>(req, "count");
+    let index = qnum::<usize>(req, "index");
+    let px = qnum::<i16>(req, "x");
+    let py = qnum::<i16>(req, "y");
+
+    if pts.is_none() && count.is_none() && index.is_none() {
+        return Resp::err(400, "falta pts, count o index para editar los puntos");
+    }
+
+    let mut g = store().lock().unwrap();
+    let res = match g.get_mut(&id) {
+        Some(Doc::Fpg { fpg, .. }) => {
+            let code = match want {
+                Some(v) => v,
+                None => return Resp::err(400, "falta el parámetro id"),
+            };
+            let m = match fpg.maps.iter_mut().find(|m| m.code == code) {
+                Some(m) => m,
+                None => return Resp::err(404, &format!("no existe el mapa {code}")),
+            };
+            update_points(m, pts, count, index, px, py)
+        }
+        Some(Doc::Map { map, .. }) => update_points(map, pts, count, index, px, py),
+        Some(_) => return Resp::err(400, "este fichero no tiene puntos de control"),
+        None => return Resp::err(404, "documento no encontrado"),
+    };
+    if let Err(r) = res {
+        return r;
+    }
+
+    drop(g);
+    doc_response(id)
+}
+
+fn move_map(req: &Request) -> Resp {
+    let id = match needs_doc(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let code = match qnum::<u32>(req, "id") {
+        Some(c) => c,
+        None => return Resp::err(400, "falta el parámetro id"),
+    };
+    let dir = match q(req, "dir") {
+        Some(v) => v,
+        None => return Resp::err(400, "falta el parámetro dir"),
+    };
+
+    let mut g = store().lock().unwrap();
+    let fpg = match g.get_mut(&id) {
+        Some(Doc::Fpg { fpg, .. }) => fpg,
+        Some(_) => return Resp::err(400, "solo se pueden reordenar mapas en un FPG"),
+        None => return Resp::err(404, "documento no encontrado"),
+    };
+
+    let pos = match fpg.maps.iter().position(|m| m.code == code) {
+        Some(i) => i,
+        None => return Resp::err(404, &format!("no existe el mapa {code}")),
+    };
+
+    match dir {
+        "up" => {
+            if pos > 0 {
+                fpg.maps.swap(pos, pos - 1);
+            }
+        }
+        "down" => {
+            if pos + 1 < fpg.maps.len() {
+                fpg.maps.swap(pos, pos + 1);
+            }
+        }
+        _ => return Resp::err(400, "dir debe ser up o down"),
+    }
+
+    drop(g);
+    doc_response(id)
+}
+
+/// Máximo de puntos de control admitido por un mapa (índices 0..=0x0FFE).
+const MAX_POINTS: usize = 0x0FFF;
+
+/// Modifica los puntos de control de un mapa.
+///
+/// Modos, por orden de precedencia:
+///   * `pts`   — sustituye la lista completa («x,y;x,y;…», `-1,-1` = indefinido);
+///   * `count` — redimensiona la lista;
+///   * `index` + `x` + `y` — fija un punto concreto.
+///
+/// El modo `pts` existe para que el cliente pueda restaurar el vector entero al
+/// deshacer: redimensionar a secas perdería los puntos recortados.
+fn update_points<T>(
+    m: &mut T,
+    pts: Option<&str>,
+    count: Option<usize>,
+    index: Option<usize>,
+    px: Option<i16>,
+    py: Option<i16>,
+) -> Result<(), Resp>
+where
+    T: PointAccess,
+{
+    if let Some(spec) = pts {
+        *m.points_mut() = parse_points(spec)?;
+        return Ok(());
+    }
+
+    if let Some(n) = count {
+        if n > MAX_POINTS {
+            return Err(Resp::err(400, "el número máximo de puntos es 4095"));
+        }
+        m.points_mut().resize(n, ControlPoint { x: -1, y: -1 });
+    }
+
+    if let Some(i) = index {
+        if i > 0x0FFE {
+            return Err(Resp::err(400, "índice de punto fuera de rango"));
+        }
+        let x = match px {
+            Some(v) => v,
+            None => return Err(Resp::err(400, "falta el parámetro x")),
+        };
+        let y = match py {
+            Some(v) => v,
+            None => return Err(Resp::err(400, "falta el parámetro y")),
+        };
+        if m.points_mut().len() <= i {
+            m.points_mut().resize(i + 1, ControlPoint { x: -1, y: -1 });
+        }
+        m.points_mut()[i] = ControlPoint { x, y };
+    }
+
+    Ok(())
+}
+
+/// Lee una lista de puntos «x,y;x,y;…». Las entradas vacías se ignoran.
+fn parse_points(spec: &str) -> Result<Vec<ControlPoint>, Resp> {
+    let mut out = Vec::new();
+    for item in spec.split(';') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if out.len() >= MAX_POINTS {
+            return Err(Resp::err(400, "el número máximo de puntos es 4095"));
+        }
+        let (xs, ys) = item
+            .split_once(',')
+            .ok_or_else(|| Resp::err(400, &format!("punto mal formado: {item}")))?;
+        let x: i16 = xs
+            .trim()
+            .parse()
+            .map_err(|_| Resp::err(400, &format!("coordenada x no válida: {xs}")))?;
+        let y: i16 = ys
+            .trim()
+            .parse()
+            .map_err(|_| Resp::err(400, &format!("coordenada y no válida: {ys}")))?;
+        out.push(ControlPoint { x, y });
+    }
+    Ok(out)
+}
+
+trait PointAccess {
+    fn points_mut(&mut self) -> &mut Vec<ControlPoint>;
+}
+
+impl PointAccess for FpgMap {
+    fn points_mut(&mut self) -> &mut Vec<ControlPoint> {
+        &mut self.points
+    }
+}
+
+impl PointAccess for Map {
+    fn points_mut(&mut self) -> &mut Vec<ControlPoint> {
+        &mut self.points
+    }
+}
+
+// ---------------------------------------------------------------------------
+// píxeles (editor de pintura)
+// ---------------------------------------------------------------------------
+
+/// Acceso común a los píxeles de un mapa, sea de un FPG o de un MAP suelto.
+///
+/// El búfer guarda los fotogramas uno tras otro: `w · h · bpp` bytes por
+/// fotograma, donde `bpp` es 1 en mapas de 8 bits (un índice de paleta por
+/// píxel) y 2 en los de 16 (RGB565 little-endian).
+trait PixAccess {
+    fn width(&self) -> i32;
+    fn height(&self) -> i32;
+    fn depth(&self) -> u8;
+    fn frames(&self) -> usize;
+    fn pixels(&self) -> &Vec<u8>;
+    fn pixels_mut(&mut self) -> &mut Vec<u8>;
+}
+
+impl PixAccess for FpgMap {
+    fn width(&self) -> i32 {
+        self.width
+    }
+    fn height(&self) -> i32 {
+        self.height
+    }
+    fn depth(&self) -> u8 {
+        self.depth
+    }
+    fn frames(&self) -> usize {
+        FpgMap::frames(self)
+    }
+    fn pixels(&self) -> &Vec<u8> {
+        &self.pixels
+    }
+    fn pixels_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.pixels
+    }
+}
+
+impl PixAccess for Map {
+    fn width(&self) -> i32 {
+        self.width as i32
+    }
+    fn height(&self) -> i32 {
+        self.height as i32
+    }
+    fn depth(&self) -> u8 {
+        self.depth
+    }
+    fn frames(&self) -> usize {
+        Map::frames(self)
+    }
+    fn pixels(&self) -> &Vec<u8> {
+        &self.pixels
+    }
+    fn pixels_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.pixels
+    }
+}
+
+fn bpp_of(depth: u8) -> usize {
+    if depth == 16 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Longitud en bytes de un fotograma.
+fn frame_len<T: PixAccess>(m: &T) -> usize {
+    (m.width().max(0) as usize) * (m.height().max(0) as usize) * bpp_of(m.depth())
+}
+
+/// Copia el fotograma `frame` (relleno a cero si el búfer se queda corto).
+fn read_frame<T: PixAccess>(m: &T, frame: usize) -> Vec<u8> {
+    let len = frame_len(m);
+    let start = frame.saturating_mul(len);
+    let mut out = m.pixels().get(start..start + len).unwrap_or(&[]).to_vec();
+    out.resize(len, 0);
+    out
+}
+
+/// Escribe un rectángulo dentro del fotograma `frame`.
+///
+/// `rect` es `(x, y, ancho, alto)` y `data` trae los píxeles por filas
+/// (`ancho · alto · bpp` bytes). El resto del fotograma no se toca.
+fn write_rect<T: PixAccess>(
+    m: &mut T,
+    frame: usize,
+    rect: (usize, usize, usize, usize),
+    data: &[u8],
+) -> Result<(), Resp> {
+    let (x, y, w, h) = rect;
+    let (mw, mh) = (m.width().max(0) as usize, m.height().max(0) as usize);
+    if w == 0 || h == 0 {
+        return Ok(());
+    }
+    if x + w > mw || y + h > mh {
+        return Err(Resp::err(
+            400,
+            &format!("el rectángulo {w}×{h} en {x},{y} se sale del mapa {mw}×{mh}"),
+        ));
+    }
+    if frame >= m.frames() {
+        return Err(Resp::err(
+            400,
+            &format!("el fotograma {frame} no existe (hay {})", m.frames()),
+        ));
+    }
+    let bpp = bpp_of(m.depth());
+    let row = w * bpp;
+    if data.len() != row * h {
+        return Err(Resp::err(
+            400,
+            &format!("se esperaban {} bytes y han llegado {}", row * h, data.len()),
+        ));
+    }
+    let flen = frame_len(m);
+    let base = frame * flen;
+    let px = m.pixels_mut();
+    // Por si el búfer venía corto (ficheros truncados): se completa a cero.
+    if px.len() < base + flen {
+        px.resize(base + flen, 0);
+    }
+    for r in 0..h {
+        let dst = base + ((y + r) * mw + x) * bpp;
+        px[dst..dst + row].copy_from_slice(&data[r * row..(r + 1) * row]);
+    }
+    Ok(())
+}
+
+/// Localiza el mapa al que se refiere la petición (`id` = código del mapa).
+macro_rules! with_map {
+    ($doc:expr, $want:expr, $code:ident => $body:expr) => {{
+        let want = $want;
+        match $doc {
+            Doc::Fpg { fpg, .. } => {
+                let code = match want {
+                    Some(c) => c,
+                    None => return Resp::err(400, "falta el parámetro id"),
+                };
+                match fpg.maps.iter_mut().find(|m| m.code == code) {
+                    Some($code) => $body,
+                    None => return Resp::err(404, "ese id de mapa no existe"),
+                }
+            }
+            Doc::Map { map, .. } => {
+                let $code = map;
+                $body
+            }
+            _ => return Resp::err(400, "este tipo de fichero no contiene mapas"),
+        }
+    }};
+}
+
+fn pixels(req: &Request) -> Resp {
+    if req.method.eq_ignore_ascii_case("GET") {
+        pixels_read(req)
+    } else {
+        pixels_write(req)
+    }
+}
+
+fn pixels_read(req: &Request) -> Resp {
+    let id = match needs_doc(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let frame = qnum::<usize>(req, "frame").unwrap_or(0);
+    let want = qnum::<u32>(req, "id");
+
+    let g = store().lock().unwrap();
+    match g.get(&id) {
+        Some(Doc::Fpg { fpg, .. }) => {
+            let m = match want {
+                Some(c) => fpg.maps.iter().find(|m| m.code == c),
+                None => fpg.maps.first(),
+            };
+            match m {
+                Some(m) => Resp::bytes("application/octet-stream", read_frame(m, frame)),
+                None => Resp::err(404, "ese id de mapa no existe"),
+            }
+        }
+        Some(Doc::Map { map, .. }) => Resp::bytes("application/octet-stream", read_frame(map, frame)),
+        Some(_) => Resp::err(400, "este tipo de fichero no contiene mapas"),
+        None => Resp::err(404, "documento no encontrado"),
+    }
+}
+
+fn pixels_write(req: &Request) -> Resp {
+    let id = match needs_doc(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let frame = qnum::<usize>(req, "frame").unwrap_or(0);
+    let want = qnum::<u32>(req, "id");
+
+    let mut g = store().lock().unwrap();
+    let doc = match g.get_mut(&id) {
+        Some(d) => d,
+        None => return Resp::err(404, "documento no encontrado"),
+    };
+
+    let res = with_map!(doc, want, m => {
+        let (mw, mh) = (m.width().max(0) as usize, m.height().max(0) as usize);
+        // Sin rectángulo se sustituye el fotograma completo.
+        let rect = match (qnum::<usize>(req, "x"), qnum::<usize>(req, "y")) {
+            (Some(x), Some(y)) => {
+                let w = qnum::<usize>(req, "w").unwrap_or(0);
+                let h = qnum::<usize>(req, "h").unwrap_or(0);
+                (x, y, w, h)
+            }
+            _ => (0, 0, mw, mh),
+        };
+        write_rect(m, frame, rect, &req.body)
+    });
+
+    match res {
+        Ok(()) => Resp::ok(),
+        Err(r) => r,
+    }
 }
 
 fn export(req: &Request) -> Resp {

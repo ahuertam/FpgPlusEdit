@@ -41,6 +41,15 @@ impl Resp {
         }
     }
 
+    /// Respuesta binaria en crudo (búferes de píxeles, por ejemplo).
+    pub fn bytes(ctype: &str, body: Vec<u8>) -> Resp {
+        Resp {
+            status: 200,
+            ctype: ctype.to_string(),
+            body,
+        }
+    }
+
     pub fn ok() -> Resp {
         Resp::json(200, "{\"ok\":true}".to_string())
     }
