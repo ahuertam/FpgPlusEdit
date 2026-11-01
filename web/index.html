@@ -67,6 +67,7 @@
         <button type="button" class="tool" data-tool="pencil" title="Lápiz (P)">Lápiz</button>
         <button type="button" class="tool" data-tool="brush" title="Pincel (B)">Pincel</button>
         <button type="button" class="tool" data-tool="eraser" title="Goma (E)">Goma</button>
+        <button type="button" class="tool" data-tool="air" title="Aerógrafo (A): pulveriza color mientras mantienes pulsado">Aerógrafo</button>
         <button type="button" class="tool" data-tool="fill" title="Rellenar (F)">Bote</button>
         <button type="button" class="tool" data-tool="pick" title="Cuentagotas (I)">Gotero</button>
         <button type="button" class="tool" data-tool="line" title="Línea (L)">Línea</button>
@@ -76,6 +77,12 @@
       </div>
       <label class="chk"><input id="fillChk" type="checkbox"> Relleno</label>
       <label class="numbox">Grosor <input id="brushSize" type="number" min="1" max="16" value="1"></label>
+      <label class="numbox">Punta
+        <select id="brushShape">
+          <option value="round">Redonda</option>
+          <option value="square">Cuadrada</option>
+        </select>
+      </label>
       <label class="numbox" id="color565Wrap" hidden>Color <input id="color565" type="color" value="#ffcc00"></label>
       <span class="spacer"></span>
       <div class="selactions" id="selActions" hidden>
@@ -90,9 +97,28 @@
       </div>
       <div class="selactions" id="floatActions" hidden>
         <span class="float-hint">Arrastra para colocarlo</span>
+        <button type="button" id="rotCcw" class="mini" title="Girar 90° a la izquierda">Girar −90°</button>
+        <button type="button" id="rotCw" class="mini" title="Girar 90° a la derecha">Girar +90°</button>
+        <label class="numbox">Ángulo
+          <input id="rotDeg" type="number" min="-180" max="180" step="5" value="0" title="Giro libre, en grados">
+        </label>
         <button type="button" id="floatOk" class="mini" title="Fijar el trozo sobre el mapa (Intro)">Anclar</button>
         <button type="button" id="floatCancel" class="mini" title="Descartar (Esc)">Cancelar</button>
       </div>
+    </div>
+
+    <!-- Capas de edición -->
+    <div class="layerbar" id="layerbar" hidden>
+      <span class="layertitle">Capas</span>
+      <select id="layerSel" title="Capa activa"></select>
+      <button type="button" id="layerAdd" class="mini" title="Añade una capa vacía encima">Añadir</button>
+      <button type="button" id="layerDup" class="mini" title="Duplica la capa activa">Duplicar</button>
+      <button type="button" id="layerUp" class="mini" title="Sube la capa activa">Subir</button>
+      <button type="button" id="layerDown" class="mini" title="Baja la capa activa">Bajar</button>
+      <button type="button" id="layerEye" class="mini" title="Muestra u oculta la capa activa">Ocultar</button>
+      <button type="button" id="layerDel" class="mini" title="Elimina la capa activa">Borrar</button>
+      <button type="button" id="layerFlat" class="mini" title="Funde las capas visibles en una sola">Fusionar</button>
+      <span class="float-hint" id="layerHint"></span>
     </div>
 
     <div class="stage" id="stage">

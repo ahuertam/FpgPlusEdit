@@ -244,6 +244,51 @@ body.no-inspector .inspector { display: none; }
   cursor: pointer;
 }
 .paintbar .chk { display: flex; align-items: center; gap: 4px; color: var(--ink-soft); }
+.paintbar .numbox select {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 3px 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+}
+.paintbar .numbox input#rotDeg { width: 58px; }
+/* El `display: flex` de arriba gana al `[hidden]` del navegador: sin esta regla,
+   el color de 16 bits se vería también al editar mapas de 8 bits. */
+.paintbar .numbox[hidden] { display: none; }
+
+/* --- capas --- */
+
+.layerbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.layerbar[hidden] { display: none; }
+.layerbar .layertitle {
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-size: 10.5px;
+  color: var(--ink-soft);
+}
+.layerbar select {
+  font-family: var(--mono);
+  font-size: 12px;
+  min-width: 120px;
+  max-width: 220px;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+}
+.layerbar .float-hint { font-size: 11px; color: var(--ink-soft); }
 
 .selactions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .selactions[hidden] { display: none; }

@@ -37,6 +37,7 @@ const state = {
   // Editor de pintura
   tool: 'view',       // herramienta activa
   brush: 1,           // grosor del pincel y la goma
+  brushShape: 'round',// forma de la punta: redonda o cuadrada
   fillShape: false,   // rectángulos y elipses rellenos
   sel565: 0xffcc00,   // colores nativos, cuando se edita un FPG de 16 bits
   buf: null,          // búfer local de píxeles del mapa activo
@@ -45,6 +46,9 @@ const state = {
   sel: null,          // rectángulo de selección, en coordenadas de imagen
   float: null,        // trozo flotante a la espera de anclarse
   drag: null,         // gesto en curso
+  airTimer: null,     // temporizador del aerógrafo, mientras se mantiene pulsado
+  layers: null,       // capas de edición; null = mapa de una sola capa
+  layer: 0,           // índice de la capa activa
 };
 
 /* ------------------------------------------------------------------ apoyo */
@@ -296,7 +300,6 @@ function applyDoc(j, opts) {
   renderEditor();
   renderProps();
   renderToolbar();
-  resetPaintState();
   loadCanvas();
 }
 
@@ -352,7 +355,6 @@ function selectMap(id) {
   renderEditor();
   renderProps();
   renderToolbar();
-  resetPaintState();
   loadCanvas();
 }
 
@@ -370,6 +372,10 @@ function loadImageEl(url) {
 
 /** Prepara el lienzo del mapa o glifo activo. */
 async function loadCanvas() {
+  // Cada recarga del lienzo (otro fotograma, otro mapa, otro id) deja atrás las
+  // capas, la selección y el trozo flotante: todo eso pertenece a la imagen que
+  // salía antes, no a la que viene ahora.
+  resetPaintState();
   if (!state.doc) {
     state.image = null;
     state.buf = null;
@@ -543,10 +549,52 @@ function blockToCanvas(w, h, depth, data) {
   return c;
 }
 
+/** Superficie sobre la que actúan los gestos: la capa activa, o el mapa entero. */
+function activeBuf() {
+  const buf = state.buf;
+  if (!buf) return null;
+  if (!state.layers) return buf;
+  return { w: buf.w, h: buf.h, depth: buf.depth, bpp: buf.bpp, data: state.layers[state.layer].data };
+}
+
+/** Mezcla las capas visibles en `state.buf.data`, que es lo que se ve y se guarda.
+    El valor 0 es transparente, así que una capa nunca tapa lo de abajo con él. */
+function composite() {
+  const buf = state.buf;
+  if (!buf || !state.layers) return;
+  const bpp = bppOf(buf.depth);
+  buf.data.fill(0);
+  for (const l of state.layers) {
+    if (!l.visible) continue;
+    const d = l.data;
+    for (let i = 0; i < buf.w * buf.h; i++) {
+      const o = i * bpp;
+      let empty = true;
+      for (let k = 0; k < bpp; k++) if (d[o + k]) { empty = false; break; }
+      if (empty) continue;
+      for (let k = 0; k < bpp; k++) buf.data[o + k] = d[o + k];
+    }
+  }
+}
+
+/** Copia de las capas, para poder deshacer. `null` si se edita un mapa liso. */
+function layersSnapshot() {
+  return state.layers
+    ? state.layers.map((l) => ({ name: l.name, visible: l.visible, data: l.data.slice() }))
+    : null;
+}
+
+function restoreLayers(snap) {
+  if (!snap) return;
+  state.layers = snap.map((l) => ({ name: l.name, visible: l.visible, data: l.data.slice() }));
+  state.layer = clamp(state.layer, 0, state.layers.length - 1);
+}
+
 /** Actualiza el lienzo fuera de pantalla del búfer activo. */
 function renderBuf() {
   const buf = state.buf;
   if (!buf) return;
+  if (state.layers) composite();
   if (!state.off || state.off.canvas.width !== buf.w || state.off.canvas.height !== buf.h) {
     const canvas = document.createElement('canvas');
     canvas.width = buf.w;
@@ -595,13 +643,23 @@ function sameBytes(a, b) {
   return true;
 }
 
-/** Sella un cuadrado de `size` píxeles centrado en (x, y). */
+/** Sella la punta del pincel, de `size` píxeles, centrada en (x, y). */
 function stamp(buf, x, y, v, size, erase, touch) {
   const half = Math.floor((size - 1) / 2);
+  const off = (size - 1) / 2;
+  const round = state.brushShape === 'round';
+  // El radio deja fuera las esquinas del cuadro salvo en las tallas más
+  // pequeñas, donde no hay esquina que recortar.
+  const r2 = (off + 0.25) * (off + 0.25);
   for (let dy = 0; dy < size; dy++) {
     const py = y - half + dy;
     if (py < 0 || py >= buf.h) continue;
+    const oy = dy - off;
     for (let dx = 0; dx < size; dx++) {
+      if (round) {
+        const ox = dx - off;
+        if (ox * ox + oy * oy > r2) continue;
+      }
       const px = x - half + dx;
       if (px < 0 || px >= buf.w) continue;
       setPx(buf, px, py, erase ? 0 : v);
@@ -709,6 +767,48 @@ function floodFill(buf, x, y, v, touch) {
   }
 }
 
+/* --------------------------------------------------------------- aerógrafo */
+
+/** Radio del pulverizado: crece con el grosor elegido. */
+const sprayRadius = () => Math.max(1, state.brush * 2);
+
+/**
+ * Pulveriza color alrededor de (x, y) con motas al azar. Se reparte en disco
+ * (raíz de la distancia) para que la densidad sea uniforme y no se acumule en
+ * el centro, y el grosor marca el radio del cerco.
+ */
+function spray(buf, x, y, v, touch) {
+  const radius = sprayRadius();
+  const dots = Math.max(1, Math.round((radius * radius) / 6));
+  for (let i = 0; i < dots; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = Math.sqrt(Math.random()) * radius;
+    const px = Math.round(x + Math.cos(angle) * dist);
+    const py = Math.round(y + Math.sin(angle) * dist);
+    if (px < 0 || py < 0 || px >= buf.w || py >= buf.h) continue;
+    setPx(buf, px, py, v);
+    if (touch) touch(px, py);
+  }
+}
+
+/** Arranca el chorro continuo del aerógrafo, si no está ya en marcha. */
+function startAir() {
+  if (state.airTimer !== null) return;
+  state.airTimer = setInterval(() => {
+    const d = state.drag;
+    const buf = activeBuf();
+    if (!d || d.tool !== 'air' || !buf) { stopAir(); return; }
+    spray(buf, d.last.x, d.last.y, paintValue(), touchDrag);
+    draw();
+  }, 40);
+}
+
+function stopAir() {
+  if (state.airTimer === null) return;
+  clearInterval(state.airTimer);
+  state.airTimer = null;
+}
+
 /* --------------------------------------------------- enlace con el servidor */
 
 /** Trae el plano de píxeles del mapa activo. */
@@ -773,18 +873,25 @@ async function reloadPixelsIfCurrent(doc, mapId, frame) {
   refreshThumb(doc, mapId);
 }
 
-/** Entrada de historial para un cambio de píxeles. */
-function pixelEntry(label, doc, mapId, frame, rect, before, after) {
-  const apply = async (bytes) => {
+/** Entrada de historial para un cambio de píxeles, con las capas al lado. */
+function pixelEntry(label, doc, mapId, frame, rect, before, after, layersBefore, layersAfter) {
+  const apply = async (bytes, layers) => {
     await sendRect(doc, mapId, frame, rect, bytes);
+    // Las capas solo se tocan si el cambio es del mapa y fotograma que se está
+    // viendo; si no, se devolverían a la pantalla las de otro sitio.
+    if (state.doc === doc && state.selected === mapId && state.frame === frame) restoreLayers(layers);
     state.dirty = true;
     await reloadPixelsIfCurrent(doc, mapId, frame);
   };
-  return { label, do: () => apply(after), undo: () => apply(before) };
+  return { label, do: () => apply(after, layersAfter), undo: () => apply(before, layersBefore), layers: !!(layersBefore || layersAfter) };
 }
 
-/** Valida el cambio, lo envía al servidor y lo apunta en el historial. */
-async function commitPixels(label, bbox, snapshot) {
+/**
+ * Valida el cambio, lo envía al servidor y lo apunta en el historial.
+ * `snapshot` es la mezcla anterior (lo que veía el usuario); `layersBefore` y
+ * `force` solo entran en juego cuando se trabaja por capas.
+ */
+async function commitPixels(label, bbox, snapshot, layersBefore, force) {
   const buf = state.buf;
   if (!buf || state.historyBusy) return;
   const doc = state.doc;
@@ -794,7 +901,9 @@ async function commitPixels(label, bbox, snapshot) {
   if (!r) return;
   const after = extractRect(buf.data, buf, r);
   const before = extractRect(snapshot, buf, r);
-  if (sameBytes(before, after)) return;
+  // Un cambio que solo toca la estructura de capas deja la mezcla igual, pero
+  // también hay que poder deshacerlo, de ahí el `force`.
+  if (sameBytes(before, after) && !force) return;
 
   state.historyBusy = true;
   try {
@@ -803,6 +912,7 @@ async function commitPixels(label, bbox, snapshot) {
     // Si el servidor rechaza el cambio, el búfer local vuelve a su sitio: si no,
     // lo que se ve en pantalla no sería lo que hay guardado.
     buf.data.set(snapshot);
+    restoreLayers(layersBefore);
     draw();
     toast(e.message, true);
     return;
@@ -810,7 +920,7 @@ async function commitPixels(label, bbox, snapshot) {
     state.historyBusy = false;
   }
 
-  state.undoStack.push(pixelEntry(label, doc, mapId, frame, r, before, after));
+  state.undoStack.push(pixelEntry(label, doc, mapId, frame, r, before, after, layersBefore, layersSnapshot()));
   state.redoStack = [];
   state.dirty = true;
   refreshThumb(doc, mapId);
@@ -821,10 +931,25 @@ async function commitPixels(label, bbox, snapshot) {
 async function withBufferEdit(label, fn) {
   const buf = state.buf;
   if (!buf || state.historyBusy) return;
-  const snapshot = buf.data.slice();
-  fn(buf);
+  const compSnap = buf.data.slice();
+  const layerSnap = layersSnapshot();
+  fn(activeBuf());
+  composite();
   draw();
-  await commitPixels(label, { x0: 0, y0: 0, x1: buf.w - 1, y1: buf.h - 1 }, snapshot);
+  await commitPixels(label, { x0: 0, y0: 0, x1: buf.w - 1, y1: buf.h - 1 }, compSnap, layerSnap);
+}
+
+/** Cambia la estructura de capas y lo registra, aunque la mezcla no varíe. */
+async function withLayers(label, fn) {
+  const buf = state.buf;
+  if (!buf || state.historyBusy) return;
+  const compSnap = buf.data.slice();
+  const layerSnap = layersSnapshot();
+  fn();
+  composite();
+  draw();
+  renderLayers();
+  await commitPixels(label, { x0: 0, y0: 0, x1: buf.w - 1, y1: buf.h - 1 }, compSnap, layerSnap, true);
 }
 
 /* -------------------------------------------------- gestos sobre el lienzo */
@@ -842,7 +967,9 @@ function beginDrag(tool, p) {
     tool,
     start: { x: p.x, y: p.y },
     last: { x: p.x, y: p.y },
-    snapshot: state.buf.data.slice(),
+    snap: activeBuf().data.slice(),  // superficie activa, para rehacer la vista previa
+    comp: state.buf.data.slice(),    // mezcla anterior, para el historial
+    layerSnap: layersSnapshot(),
     bbox: { x0: p.x, y0: p.y, x1: p.x, y1: p.y },
     rect: null,
   };
@@ -852,13 +979,14 @@ function endDrag(label) {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
-  commitPixels(label, d.bbox, d.snapshot);
+  composite();
+  commitPixels(label, d.bbox, d.comp, d.layerSnap);
 }
 
 function updateShapePreview(p) {
   const d = state.drag;
-  const buf = state.buf;
-  buf.data.set(d.snapshot);
+  const buf = activeBuf();
+  buf.data.set(d.snap);
   d.bbox = {
     x0: Math.min(d.start.x, p.x),
     y0: Math.min(d.start.y, p.y),
@@ -876,24 +1004,116 @@ const pointInRect = (p, r) => r && p.x >= r.x && p.y >= r.y && p.x < r.x + r.w &
 
 /** Convierte el rectángulo de selección en un trozo flotante que se puede mover. */
 function liftSelection() {
-  const buf = state.buf;
+  const buf = activeBuf();
   const r = clipRect({ x0: state.sel.x, y0: state.sel.y, x1: state.sel.x + state.sel.w - 1, y1: state.sel.y + state.sel.h - 1 }, buf);
   if (!r) return false;
   const data = extractRect(buf.data, buf, r);
-  setFloat(r.x, r.y, r.w, r.h, data);
+  // Se apunta cómo estaba el mapa antes de levantar el recorte: el origen se
+  // vacía justo debajo, así que si el trozo acaba descartándose hay que poder
+  // devolverlo a su sitio.
+  setFloat(r.x, r.y, r.w, r.h, data, { comp: state.buf.data.slice(), layers: layersSnapshot(), rect: r });
   // Se vacía el origen: así arrastrar se comporta como mover, no como copiar.
   for (let y = r.y; y < r.y + r.h && y < buf.h; y++) {
     for (let x = r.x; x < r.x + r.w && x < buf.w; x++) setPx(buf, x, y, 0);
   }
+  composite();
   state.sel = null;
   return true;
 }
 
-function setFloat(x, y, w, h, data) {
-  if (!state.buf) return;
-  state.float = { x, y, w, h, depth: state.buf.depth, data, canvas: blockToCanvas(w, h, state.buf.depth, data) };
+/**
+ * Crea el trozo flotante a partir de un recorte y lo deja sin girar.
+ * `restore`, si viene, guarda el mapa tal y como estaba antes de levantar el
+ * recorte, para poder deshacer el hueco si el trozo se descarta.
+ */
+function setFloat(x, y, w, h, data, restore) {
+  const buf = state.buf;
+  if (!buf) return;
+  state.float = {
+    x,
+    y,
+    w,
+    h,
+    depth: buf.depth,
+    angle: 0,                              // grados, en el sentido de las agujas
+    src: { w, h, depth: buf.depth, data }, // recorte original, del que se parte siempre
+    data: data.slice(),
+    canvas: blockToCanvas(w, h, buf.depth, data),
+    restore: restore || null,
+  };
+  $('rotDeg').value = '0';
 }
 
+/** Normaliza un ángulo a (−180, 180]. */
+function normAngle(a) {
+  a = a % 360;
+  if (a > 180) a -= 360;
+  if (a <= -180) a += 360;
+  return a;
+}
+
+/** Gira el trozo flotante. `absolute` fija el ángulo total; si no, se suma. */
+function rotateFloat(delta, absolute) {
+  const f = state.float;
+  if (!f) return;
+  f.angle = normAngle(absolute ? delta : f.angle + delta);
+  renderFloatBitmap();
+  $('rotDeg').value = String(f.angle);
+  draw();
+}
+
+/**
+ * Rehace el recorte girado píxel a píxel, tomando siempre el vecino más
+ * próximo del recorte original: así los colores se conservan exactos y no hay
+ * que volver a buscar el índice de paleta. La caja crece hasta contener el
+ * rectángulo girado y el centro se mantiene en su sitio.
+ */
+function renderFloatBitmap() {
+  const f = state.float;
+  if (!f) return;
+  const src = f.src;
+  const bpp = bppOf(src.depth);
+  if (!f.angle) {
+    f.w = src.w;
+    f.h = src.h;
+    f.data = src.data.slice();
+    f.canvas = blockToCanvas(f.w, f.h, src.depth, f.data);
+    return;
+  }
+  const a = (f.angle * Math.PI) / 180;
+  const cos = Math.cos(a);
+  const sin = Math.sin(a);
+  const nw = Math.max(1, Math.round(Math.abs(src.w * cos) + Math.abs(src.h * sin)));
+  const nh = Math.max(1, Math.round(Math.abs(src.w * sin) + Math.abs(src.h * cos)));
+  const out = new Uint8Array(nw * nh * bpp);
+  const cx = (src.w - 1) / 2;
+  const cy = (src.h - 1) / 2;
+  const ncx = (nw - 1) / 2;
+  const ncy = (nh - 1) / 2;
+  for (let y = 0; y < nh; y++) {
+    for (let x = 0; x < nw; x++) {
+      const dx = x - ncx;
+      const dy = y - ncy;
+      // Rotación inversa: de la caja nueva al recorte original.
+      const sx = Math.round(dx * cos + dy * sin + cx);
+      const sy = Math.round(-dx * sin + dy * cos + cy);
+      if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) continue;
+      const si = (sy * src.w + sx) * bpp;
+      const di = (y * nw + x) * bpp;
+      for (let k = 0; k < bpp; k++) out[di + k] = src.data[si + k];
+    }
+  }
+  const pcx = f.x + (f.w - 1) / 2;
+  const pcy = f.y + (f.h - 1) / 2;
+  f.w = nw;
+  f.h = nh;
+  f.x = Math.round(pcx - (nw - 1) / 2);
+  f.y = Math.round(pcy - (nh - 1) / 2);
+  f.data = out;
+  f.canvas = blockToCanvas(nw, nh, src.depth, out);
+}
+
+/** Plasta el trozo sobre el mapa. El valor 0 es transparente y no tapa nada. */
 function blitFloat(buf, f) {
   const bpp = bppOf(buf.depth);
   for (let y = 0; y < f.h; y++) {
@@ -903,28 +1123,61 @@ function blitFloat(buf, f) {
       const px = f.x + x;
       if (px < 0 || px >= buf.w) continue;
       const si = (y * f.w + x) * bpp;
+      let empty = true;
+      for (let k = 0; k < bpp; k++) if (f.data[si + k]) { empty = false; break; }
+      if (empty) continue;
       const di = (py * buf.w + px) * bpp;
       for (let k = 0; k < bpp; k++) buf.data[di + k] = f.data[si + k];
     }
   }
 }
 
+/** Rectángulo que hay que enviar al fijar el trozo. Cubre el pegado y, si el
+    trozo venía de levantar un recorte, también el hueco que dejó en su origen:
+    ese hueco solo existe en local y sin enviarlo el servidor conservaría los
+    píxeles viejos donde estaba el recorte. */
+function floatCommitRect(f) {
+  const bb = { x0: f.x, y0: f.y, x1: f.x + f.w - 1, y1: f.y + f.h - 1 };
+  const s = f.restore && f.restore.rect;
+  if (s) {
+    bb.x0 = Math.min(bb.x0, s.x);
+    bb.y0 = Math.min(bb.y0, s.y);
+    bb.x1 = Math.max(bb.x1, s.x + s.w - 1);
+    bb.y1 = Math.max(bb.y1, s.y + s.h - 1);
+  }
+  return bb;
+}
+
 async function anchorFloat() {
   const f = state.float;
   const buf = state.buf;
   if (!f || !buf) return;
-  const snapshot = buf.data.slice();
-  blitFloat(buf, f);
+  const compSnap = buf.data.slice();
+  const layerSnap = layersSnapshot();
+  const target = activeBuf();
+  const bb = floatCommitRect(f);
+  blitFloat(target, f);
   state.float = null;
   state.sel = clipRect({ x0: f.x, y0: f.y, x1: f.x + f.w - 1, y1: f.y + f.h - 1 }, buf);
+  composite();
   draw();
   renderPaint();
-  await commitPixels('trozo pegado', { x0: 0, y0: 0, x1: buf.w - 1, y1: buf.h - 1 }, snapshot);
+  await commitPixels('trozo pegado', bb, compSnap, layerSnap);
 }
 
 function cancelFloat() {
-  if (!state.float) return;
+  const f = state.float;
+  if (!f) return;
   state.float = null;
+  // Un recorte levantado del mapa dejó el hueco de su sitio original: al
+  // descartarlo hay que devolver el mapa a como estaba antes de levantarlo. Si
+  // entretanto se han activado o cerrado las capas, el estado apuntado ya no
+  // describe la pantalla y es mejor no tocar nada.
+  if (f.restore && !!state.layers === !!f.restore.layers) {
+    state.buf.data.set(f.restore.comp);
+    restoreLayers(f.restore.layers);
+    composite();
+  }
   draw();
   renderPaint();
 }
@@ -1107,7 +1360,9 @@ function renderPaint() {
   }
   $('brushSize').disabled = !hasBuf;
   $('fillChk').disabled = !hasBuf;
+  $('brushShape').disabled = !hasBuf;
   $('brushSize').value = String(state.brush);
+  $('brushShape').value = state.brushShape;
   $('fillChk').checked = state.fillShape;
   const f16 = hasBuf && buf.depth === 16;
   $('color565Wrap').hidden = !f16;
@@ -1125,16 +1380,141 @@ function renderPaint() {
   $('selDel').disabled = !state.sel;
   $('selNone').disabled = !state.sel;
   $('floatActions').hidden = !state.float;
+  renderLayers();
 
   const cv = $('view');
-  cv.classList.toggle('painting', hasBuf && ['pencil', 'brush', 'eraser', 'fill', 'line', 'rect', 'ellipse'].includes(state.tool));
+  cv.classList.toggle('painting', hasBuf && ['pencil', 'brush', 'eraser', 'air', 'fill', 'line', 'rect', 'ellipse'].includes(state.tool));
   cv.classList.toggle('selecting', hasBuf && state.tool === 'select');
 }
 
 function resetPaintState() {
+  stopAir();
   state.sel = null;
   state.float = null;
   state.drag = null;
+  closeLayers();
+}
+
+/* -------------------------------------------------------------- capas */
+
+let layerSeq = 1;
+
+/**
+ * Cierra la sesión de capas. Se descartan y con ellas el historial que iba
+ * apuntado a su estructura: al no haber ya capas, esas entradas no tendrían
+ * dónde volver. Las entradas de píxeles sueltos se conservan.
+ */
+function closeLayers() {
+  if (!state.layers) return;
+  state.layers = null;
+  state.layer = 0;
+  layerSeq = 1;
+  state.undoStack = state.undoStack.filter((e) => !e.layers);
+  state.redoStack = state.redoStack.filter((e) => !e.layers);
+  renderToolbar();
+}
+
+/** Pinta la barra de capas y refleja el estado actual. */
+function renderLayers() {
+  const bar = $('layerbar');
+  if (!bar) return;
+  bar.hidden = !state.buf;
+  if (!state.buf) return;
+  const sel = $('layerSel');
+  const has = !!state.layers;
+  if (has) {
+    if (sel.options.length !== state.layers.length) {
+      sel.innerHTML = '';
+      for (let i = 0; i < state.layers.length; i++) sel.append(new Option('', String(i)));
+    }
+    state.layers.forEach((l, i) => {
+      sel.options[i].textContent = (l.visible ? '' : '· ') + l.name;
+    });
+    sel.value = String(state.layer);
+    sel.disabled = false;
+    $('layerHint').textContent = `${state.layers.length} capa${state.layers.length === 1 ? '' : 's'}`;
+  } else {
+    if (sel.options.length !== 1) { sel.innerHTML = ''; sel.append(new Option('', '0')); }
+    sel.options[0].textContent = 'Fondo (sin capas)';
+    sel.value = '0';
+    sel.disabled = true;
+    $('layerHint').textContent = 'Añade una capa para separar los trazos.';
+  }
+  $('layerAdd').disabled = false;
+  $('layerDup').disabled = !has;
+  $('layerUp').disabled = !has || state.layer <= 0;
+  $('layerDown').disabled = !has || state.layer >= state.layers.length - 1;
+  $('layerEye').disabled = !has;
+  $('layerEye').textContent = has && !state.layers[state.layer].visible ? 'Mostrar' : 'Ocultar';
+  $('layerDel').disabled = !has || state.layers.length <= 1;
+  $('layerFlat').disabled = !has;
+}
+
+/** Convierte el mapa liso en una primera capa, sin tocar los píxeles. */
+function enterLayers() {
+  if (state.layers || !state.buf) return;
+  state.layers = [{ name: 'Capa 1', visible: true, data: state.buf.data.slice() }];
+  state.layer = 0;
+  layerSeq = 2;
+  // Las entradas de historial anteriores son del mapa liso y, al deshacerlas,
+  // las capas volverían a tapar el resultado. Se empieza de cero.
+  state.undoStack = [];
+  state.redoStack = [];
+  renderToolbar();
+  toast('Capas activadas: el historial de deshacer empieza de cero');
+}
+
+function newLayer() {
+  if (!state.buf) return;
+  enterLayers();
+  const data = new Uint8Array(state.buf.data.length);
+  state.layers.splice(state.layer + 1, 0, { name: `Capa ${layerSeq++}`, visible: true, data });
+  state.layer++;
+  renderLayers();
+}
+
+function duplicateLayer() {
+  if (!state.layers) return;
+  withLayers('duplicar capa', () => {
+    const src = state.layers[state.layer];
+    state.layers.splice(state.layer + 1, 0, { name: `${src.name} copia`, visible: src.visible, data: src.data.slice() });
+    state.layer++;
+  });
+}
+
+function moveLayer(delta) {
+  const j = state.layers ? state.layer + delta : -1;
+  if (!state.layers || j < 0 || j >= state.layers.length) return;
+  withLayers('mover capa', () => {
+    const [l] = state.layers.splice(state.layer, 1);
+    state.layers.splice(j, 0, l);
+    state.layer = j;
+  });
+}
+
+function toggleLayer() {
+  if (!state.layers) return;
+  withLayers('mostrar u ocultar capa', () => {
+    const l = state.layers[state.layer];
+    l.visible = !l.visible;
+  });
+}
+
+function deleteLayer() {
+  if (!state.layers || state.layers.length <= 1) return;
+  withLayers('borrar capa', () => {
+    state.layers.splice(state.layer, 1);
+    state.layer = Math.max(0, state.layer - 1);
+  });
+}
+
+function flattenLayers() {
+  if (!state.layers) return;
+  withLayers('fusionar capas', () => {
+    composite();
+    state.layers = [{ name: 'Fondo', visible: true, data: state.buf.data.slice() }];
+    state.layer = 0;
+  });
 }
 
 /* -------------------------------------------------- puntero del lienzo */
@@ -1197,13 +1577,13 @@ async function onCanvasDown(ev) {
 
   if (tool === 'select') {
     if (state.sel && pointInRect(p, state.sel) && liftSelection()) {
-      state.drag = { tool: 'moveFloat', start: { ...p }, last: { ...p }, snapshot: null, bbox: null, rect: null };
+      state.drag = { tool: 'moveFloat', start: { ...p }, last: { ...p }, snap: null, comp: null, layerSnap: null, bbox: null, rect: null };
       capturePointer(ev);
       draw();
       renderPaint();
       return;
     }
-    state.drag = { tool: 'selectRect', start: { ...p }, last: { ...p }, snapshot: null, bbox: null, rect: { x: p.x, y: p.y, w: 1, h: 1 } };
+    state.drag = { tool: 'selectRect', start: { ...p }, last: { ...p }, snap: null, comp: null, layerSnap: null, bbox: null, rect: { x: p.x, y: p.y, w: 1, h: 1 } };
     capturePointer(ev);
     draw();
     return;
@@ -1211,7 +1591,7 @@ async function onCanvasDown(ev) {
 
   if (tool === 'fill') {
     beginDrag('fill', p);
-    floodFill(buf, p.x, p.y, paintValue(), touchDrag);
+    floodFill(activeBuf(), p.x, p.y, paintValue(), touchDrag);
     endDrag('relleno');
     return;
   }
@@ -1220,8 +1600,14 @@ async function onCanvasDown(ev) {
   capturePointer(ev);
   if (tool === 'pencil' || tool === 'brush' || tool === 'eraser') {
     const size = tool === 'pencil' ? 1 : state.brush;
-    stamp(buf, p.x, p.y, tool === 'eraser' ? 0 : paintValue(), size, tool === 'eraser', touchDrag);
+    stamp(activeBuf(), p.x, p.y, tool === 'eraser' ? 0 : paintValue(), size, tool === 'eraser', touchDrag);
     draw();
+  } else if (tool === 'air') {
+    // El aerógrafo no dibuja de una vez: suelta un chorro mientras se mantenga
+    // pulsado, así que aquí solo hay que abrir el grifo.
+    spray(activeBuf(), p.x, p.y, paintValue(), touchDrag);
+    draw();
+    startAir();
   } else {
     updateShapePreview(p);
   }
@@ -1237,9 +1623,14 @@ function onCanvasMove(ev) {
   if (d.tool === 'pencil' || d.tool === 'brush' || d.tool === 'eraser') {
     const size = d.tool === 'pencil' ? 1 : state.brush;
     const erase = d.tool === 'eraser';
-    drawLine(buf, d.last.x, d.last.y, p.x, p.y, erase ? 0 : paintValue(), size, erase, touchDrag);
+    drawLine(activeBuf(), d.last.x, d.last.y, p.x, p.y, erase ? 0 : paintValue(), size, erase, touchDrag);
     d.last = { x: p.x, y: p.y };
     draw();
+    return;
+  }
+  if (d.tool === 'air') {
+    // Solo se mueve el punto de pulverizado: el chorro lo suelta el temporizador.
+    d.last = { x: p.x, y: p.y };
     return;
   }
   if (d.tool === 'line' || d.tool === 'rect' || d.tool === 'ellipse') {
@@ -1257,6 +1648,9 @@ function onCanvasMove(ev) {
     return;
   }
   if (d.tool === 'moveFloat') {
+    // Si el trozo se fijó a media pulsación (Intro), el arrastre ya no tiene
+    // destino: se descarta el gesto en vez de tropezar con un flotante nulo.
+    if (!state.float) { state.drag = null; return; }
     state.float.x += p.x - d.last.x;
     state.float.y += p.y - d.last.y;
     d.last = { x: p.x, y: p.y };
@@ -1278,6 +1672,11 @@ function onCanvasUp(ev) {
   if (d.tool === 'moveFloat') {
     state.drag = null;
     renderPaint();
+    return;
+  }
+  if (d.tool === 'air') {
+    stopAir();
+    endDrag('aerógrafo');
     return;
   }
   const labels = { pencil: 'lápiz', brush: 'pincel', eraser: 'goma', line: 'línea', rect: 'rectángulo', ellipse: 'elipse' };
@@ -1499,6 +1898,7 @@ async function undoAction() {
   } finally {
     state.historyBusy = false;
     renderToolbar();
+    renderLayers();
   }
 }
 
@@ -1516,6 +1916,7 @@ async function redoAction() {
   } finally {
     state.historyBusy = false;
     renderToolbar();
+    renderLayers();
   }
 }
 
@@ -1949,7 +2350,7 @@ function onKey(ev) {
   if (escribiendo) return;
 
   if (state.buf && $('modal').hidden) {
-    const tools = { v: 'view', p: 'pencil', b: 'brush', e: 'eraser', f: 'fill', i: 'pick', l: 'line', r: 'rect', o: 'ellipse', s: 'select' };
+    const tools = { v: 'view', p: 'pencil', b: 'brush', e: 'eraser', a: 'air', f: 'fill', i: 'pick', l: 'line', r: 'rect', o: 'ellipse', s: 'select' };
     const t = tools[ev.key.toLowerCase()];
     if (t) { setTool(t); return; }
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
@@ -2089,6 +2490,7 @@ function wire() {
   $('brushSize').oninput = () => {
     state.brush = clamp(+$('brushSize').value || 1, 1, 16);
   };
+  $('brushShape').onchange = () => { state.brushShape = $('brushShape').value; };
   $('fillChk').onchange = () => { state.fillShape = $('fillChk').checked; };
   $('color565').oninput = () => { state.sel565 = hexTo565($('color565').value); };
   $('selCopy').onclick = doCopy;
@@ -2101,6 +2503,22 @@ function wire() {
   $('selNone').onclick = clearSelection;
   $('floatOk').onclick = anchorFloat;
   $('floatCancel').onclick = cancelFloat;
+  $('rotCcw').onclick = () => rotateFloat(-90);
+  $('rotCw').onclick = () => rotateFloat(90);
+  $('rotDeg').oninput = () => rotateFloat(+$('rotDeg').value || 0, true);
+
+  $('layerSel').onchange = () => {
+    if (!state.layers) return;
+    state.layer = clamp(+$('layerSel').value || 0, 0, state.layers.length - 1);
+    renderLayers();
+  };
+  $('layerAdd').onclick = newLayer;
+  $('layerDup').onclick = duplicateLayer;
+  $('layerUp').onclick = () => moveLayer(1);
+  $('layerDown').onclick = () => moveLayer(-1);
+  $('layerEye').onclick = toggleLayer;
+  $('layerDel').onclick = deleteLayer;
+  $('layerFlat').onclick = flattenLayers;
 
   const cv = $('view');
   cv.addEventListener('pointerdown', onCanvasDown);
