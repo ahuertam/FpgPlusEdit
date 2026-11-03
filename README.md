@@ -216,6 +216,30 @@ distinto de cero.
 
 Los enteros son little-endian. El índice 0 de la paleta es transparente.
 
+## Límites y garantías
+
+La copia byte a byte es la regla de la casa: al guardar un fichero sin tocar sus
+mapas, lo que sale es idéntico a lo que entró (mismo SHA256), incluidos el campo
+`regsize` de cada bloque —que cuenta puntos de control y animación, no solo los
+píxeles— y la compresión GZIP original. De ahí salen los `tests/fixtures` y la
+ida y vuelta que vigila `tools/check-web.mjs`.
+
+Para que una petición retorcida no tumbe el editor, ni el del navegador, hay
+unos topes:
+
+| Qué | Tope |
+|---|---|
+| Tamaño de un mapa | 4096×4096 |
+| Búfer de un mapa (todos los fotogramas juntos) | 256 MB |
+| Baldosas de un troceado | 4096 |
+| Imagen que se importa | 4096×4096 |
+| Cuerpo de una petición al servidor local | 512 MB |
+
+El servidor local escucha en `127.0.0.1` y solo responde a `127.0.0.1`,
+`localhost` y `::1`: cualquier otro `Host` se descarta, de modo que una página
+ajena no puede alcanzar la API por *DNS rebinding*. Los ficheros estáticos se
+sirven únicamente desde `web/`.
+
 ## Licencia
 
 GPL-3.0-or-later. Ver [`LICENSE`](LICENSE).

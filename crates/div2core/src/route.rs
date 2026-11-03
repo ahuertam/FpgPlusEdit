@@ -13,6 +13,12 @@ use div2fmt::{gzip, render, ControlPoint, Fnt, Fpg, FpgMap, Map, Palette};
 /// Máximo de puntos de control admitido por un mapa (índices 0..=0x0FFE).
 pub const MAX_POINTS: usize = 0x0FFF;
 
+/// Máximo de baldosas que puede generar un troceado de mapa.
+const MAX_SPLIT_TILES: usize = 4096;
+
+/// Tope de bytes del búfer de un mapa (todos los fotogramas juntos).
+const MAX_MAP_BYTES: usize = 256 * 1024 * 1024;
+
 /// Atiende una petición. El `fs` solo se usa en los endpoints que lo necesitan.
 pub fn route(store: &mut Store, req: &Request, env: &Env, fs: &mut dyn Fs) -> Resp {
     // La interfaz llama con la ruta completa (`/api/open`); el puente de
@@ -513,7 +519,9 @@ fn write_rect<T: PixAccess>(
     if w == 0 || h == 0 {
         return Ok(());
     }
-    if x + w > mw || y + h > mh {
+    if x.checked_add(w).map_or(true, |end| end > mw)
+        || y.checked_add(h).map_or(true, |end| end > mh)
+    {
         return Err(Resp::err(
             400,
             &format!("el rectángulo {w}×{h} en {x},{y} se sale del mapa {mw}×{mh}"),
@@ -621,14 +629,18 @@ fn pixels_write(req: &Request, store: &mut Store) -> Resp {
 
     let res = with_map!(doc, want, m => {
         let (mw, mh) = (m.width().max(0) as usize, m.height().max(0) as usize);
-        // Sin rectángulo se sustituye el fotograma completo.
-        let rect = match (req.qnum::<usize>("x"), req.qnum::<usize>("y")) {
-            (Some(x), Some(y)) => {
-                let w = req.qnum::<usize>("w").unwrap_or(0);
-                let h = req.qnum::<usize>("h").unwrap_or(0);
-                (x, y, w, h)
-            }
-            _ => (0, 0, mw, mh),
+        // Sin rectángulo se sustituye el fotograma completo. Si se indica uno,
+        // tienen que venir los cuatro valores: así un parámetro suelto mal
+        // formado no acaba reemplazando el fotograma entero sin avisar.
+        let rect = match (
+            req.qnum::<usize>("x"),
+            req.qnum::<usize>("y"),
+            req.qnum::<usize>("w"),
+            req.qnum::<usize>("h"),
+        ) {
+            (None, None, None, None) => (0, 0, mw, mh),
+            (Some(x), Some(y), Some(w), Some(h)) => (x, y, w, h),
+            _ => return Resp::err(400, "para escribir un rectángulo hacen falta x, y, w y h"),
         };
         write_rect(m, frame, rect, &req.body)
     });
@@ -702,6 +714,18 @@ fn import(req: &Request, store: &mut Store, fs: &mut dyn Fs) -> Resp {
         Ok(r) => r,
         Err(e) => return Resp::err(400, &format!("no se puede leer la imagen: {e}")),
     };
+    if rgba.width == 0 || rgba.height == 0 {
+        return Resp::err(400, "la imagen no tiene tamaño");
+    }
+    if rgba.width > 4096 || rgba.height > 4096 {
+        return Resp::err(
+            400,
+            &format!(
+                "la imagen {}×{} supera el tamaño máximo de 4096×4096",
+                rgba.width, rgba.height
+            ),
+        );
+    }
 
     let doc = match store.get_mut(id) {
         Some(d) => d,
@@ -954,6 +978,15 @@ fn map_split(req: &Request, store: &mut Store) -> Resp {
         let mut first = None;
         let cols = sw.div_ceil(tw);
         let rows = sh.div_ceil(th);
+        let tiles = cols.saturating_mul(rows);
+        if tiles > MAX_SPLIT_TILES {
+            return Resp::err(
+                400,
+                &format!(
+                    "el troceado daría {tiles} baldosas (máximo {MAX_SPLIT_TILES}); usa baldosas mayores"
+                ),
+            );
+        }
 
         for ry in 0..rows {
             for rx in 0..cols {
@@ -1156,6 +1189,15 @@ fn resize_pixels<T: PixAccess>(m: &mut T, nw: usize, nh: usize, anchor: &str) ->
     let oh = m.height().max(0) as usize;
     let bpp = bpp_of(m.depth());
     let frames = m.frames().max(1);
+    // Las dimensiones van acotadas, pero los fotogramas vienen del fichero: sin
+    // este tope, un mapa de 1×1 con miles de fotogramas desbordaría al agrandarlo.
+    let total = nw
+        .checked_mul(nh)
+        .and_then(|v| v.checked_mul(bpp))
+        .and_then(|v| v.checked_mul(frames));
+    if total.map_or(true, |v| v > MAX_MAP_BYTES) {
+        return Err(Resp::err(400, "el mapa resultante sería demasiado grande"));
+    }
     let (dx, dy) = anchor_offset(anchor, ow, oh, nw, nh);
 
     let old = std::mem::take(m.pixels_mut());

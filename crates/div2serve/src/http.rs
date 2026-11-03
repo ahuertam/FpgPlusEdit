@@ -15,6 +15,30 @@ use std::net::TcpStream;
 pub use div2core::percent_decode;
 pub use div2core::{Request, Resp};
 
+/// Tope del cuerpo admitido. Sin él, un `Content-Length` desmedido haría que
+/// el servidor intentase reservar esa memoria de golpe.
+const MAX_BODY: usize = 512 * 1024 * 1024;
+
+/// ¿Es un `Host` al que tiene sentido responder?
+///
+/// El servidor escucha solo en `127.0.0.1`, así que un `Host` de otro dominio
+/// delata un *DNS rebinding*: una página ajena que resuelve su propio nombre a
+/// la dirección local para hablar con la API como si fuera de su origen.
+fn host_allowed(host: &str) -> bool {
+    let h = host.trim();
+    if h.is_empty() {
+        // Sin cabecera `Host` (cliente antiguo): un navegador siempre la manda,
+        // así que por aquí no llega un rebinding.
+        return true;
+    }
+    let name = match h.rsplit_once(':') {
+        Some((n, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => n,
+        _ => h,
+    };
+    let name = name.trim_start_matches('[').trim_end_matches(']');
+    matches!(name, "127.0.0.1" | "localhost" | "::1")
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -57,10 +81,25 @@ pub fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> 
         }
     }
 
+    if let Some(host) = headers.get("host") {
+        if !host_allowed(host) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("host no permitido: {host}"),
+            ));
+        }
+    }
+
     let len: usize = headers
         .get("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    if len > MAX_BODY {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cuerpo de {len} bytes: supera el máximo de {MAX_BODY}"),
+        ));
+    }
     let mut body = vec![0u8; len];
     if len > 0 {
         reader.read_exact(&mut body)?;

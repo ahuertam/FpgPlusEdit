@@ -133,6 +133,44 @@ fn brush_roundtrip_byte_a_byte() {
     assert_eq!(out, bytes);
 }
 
+/// 6. El `regsize` escrito incluye puntos y animación (no solo los píxeles).
+///
+/// Los ficheros originales guardan en ese campo el tamaño del bloque completo;
+/// si se dejara en `64 + píxeles`, guardar un FPG con puntos lo desviaría del
+/// original y rompería la copia byte a byte.
+#[test]
+fn regsize_incluye_puntos_y_animacion() {
+    let mut m = FpgMap::new(1, 4, 4, 8);
+    m.points.push(ControlPoint { x: 1, y: 2 });
+    m.points.push(ControlPoint { x: -1, y: -1 });
+    m.animation = Some(Animation {
+        frames: 2,
+        length: 2,
+        speed: 100,
+        sequence: vec![0, 1],
+    });
+    // Con animación, el búfer de píxeles ha de cubrir todos los fotogramas.
+    m.pixels.resize(4 * 4 * 2, 0);
+
+    let fpg = Fpg {
+        depth: 8,
+        palette: Some(Palette::new()),
+        maps: vec![m],
+    };
+    let bytes = fpg.write();
+
+    // Cabecera (8) + paleta + `code` (4): ahí empieza el campo `regsize`.
+    let off = 8 + PALETTE_SIZE + 4;
+    let regsize = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+    let esperado = 64 + 2 * 4 + (6 + 2 * 2) + 4 * 4 * 2;
+    assert_eq!(regsize, esperado, "regsize debe incluir puntos y animación");
+
+    // Y lo que se relee conserva puntos y animación.
+    let re = Fpg::read(&bytes).unwrap();
+    assert_eq!(re.maps[0].points, fpg.maps[0].points);
+    assert_eq!(re.maps[0].animation, fpg.maps[0].animation);
+}
+
 /// Comprobación extra del parser FNT contra el fichero real.
 #[test]
 fn fnt_help() {

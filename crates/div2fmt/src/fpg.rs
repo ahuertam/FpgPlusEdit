@@ -88,9 +88,17 @@ impl FpgMap {
         self.animation.as_ref().map(|a| a.frames as usize).unwrap_or(1)
     }
 
-    /// Tamaño de registro informativo: 64 + bytes de píxel.
+    /// Tamaño del bloque completo: cabecera + puntos + animación + píxeles.
+    ///
+    /// Coincide con el `regsize` que escriben las herramientas originales (los
+    /// puntos y la animación forman parte del registro), de modo que guardar un
+    /// FPG sin cambios reproduce el fichero byte a byte.
     pub fn regsize(&self) -> u32 {
-        (FPG_BLOCK_HEADER + self.pixels.len()) as u32
+        let mut len = FPG_BLOCK_HEADER + self.pixels.len() + self.points.len() * 4;
+        if let Some(a) = &self.animation {
+            len += 6 + a.sequence.len() * 2;
+        }
+        len as u32
     }
 
     /// Valor de `n_flags` (4 bytes en FPG) reconstruido desde los componentes.
