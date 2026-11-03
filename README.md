@@ -158,6 +158,18 @@ Qué permite hacer:
   pintura, formas, selección con recortes que se mueven y se fijan con Intro,
   capas y rotación libre, con deshacer y rehacer. Vale igual para mapas de 8 y
   de 16 bits.
+- Trazos largos, como los del taller original: multilínea, curva de Bézier y
+  multicurva se van marcando con clics y se cierran con Intro; el texto se
+  estampa sobre el lienzo y la barra de punteado deja los trazos a cuadros.
+- Puntas y estampas: se abre `BRUSH.FPG` de `SYSTEM` y sus puntas de varios
+  colores se sellan tal cual; además, cualquier mapa del FPG puede hacer de
+  textura repetida al pintar, con la opción de verla antes sobre el lienzo.
+- Puntos de control del sprite sobre el propio lienzo (`Shift+F2`): se colocan
+  con un clic y se mueven arrastrándolos, con X/Y a la vista. `K` abre el
+  gráfico en una ventana aparte y lo copia al portapapeles.
+- Crear y transformar mapas: mapa nuevo (en blanco, duplicado o añadido al FPG),
+  redimensionar y recortar con anclaje, trocear en baldosas y convertir el FPG
+  entero en un mural y al revés, con vista previa.
 - Editar la paleta de 256 colores (componentes de 0 a 63) con vista previa.
 - Navegar los fotogramas de los mapas animados y los glifos de las fuentes.
 - Importar imágenes (PNG, BMP, PCX, JPEG) como nuevos mapas de un FPG.

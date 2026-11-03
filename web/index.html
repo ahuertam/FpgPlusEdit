@@ -126,6 +126,18 @@
       </div>
     </div>
 
+    <!-- Puntas del taller y pintura con textura -->
+    <div class="brushbar" id="brushbar" hidden>
+      <span class="layertitle">Punta</span>
+      <select id="brushLibSel" title="Punta cargada de BRUSH.FPG"></select>
+      <button type="button" id="brushLibBtn" class="mini" title="Abrir SYSTEM\BRUSH.FPG, el fichero de puntas del taller original">Abrir BRUSH.FPG…</button>
+      <span class="layertitle">Textura</span>
+      <select id="texSel" title="Mapa de este documento repetido como estampa al pintar"></select>
+      <label class="chk"><input id="texPaintChk" type="checkbox"> Pintar con textura (U)</label>
+      <label class="chk"><input id="texViewChk" type="checkbox"> Ver textura (X)</label>
+      <span class="float-hint" id="brushHint"></span>
+    </div>
+
     <!-- Capas de edición -->
     <div class="layerbar" id="layerbar" hidden>
       <span class="layertitle">Capas</span>

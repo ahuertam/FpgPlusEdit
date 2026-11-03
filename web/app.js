@@ -46,6 +46,13 @@ const state = {
   dither: false,      // barra de punteado: los trazos van a cuadros
   text: 'TEXTO',      // texto que estampa la herramienta de texto
   textSize: 14,       // cuerpo del texto, en píxeles
+  brushFpg: 0,        // mapa de BRUSH.FPG elegido como punta; 0 = la punta de siempre
+  brushImg: null,     // píxeles de esa punta, ya traídos del núcleo
+  texMap: 0,          // mapa del documento usado como textura; 0 = ninguna
+  texImg: null,       // píxeles de esa textura
+  texTile: null,      // esa textura ya convertida a lienzo, para verla repetida
+  texPaint: false,    // pintar con la textura (U)
+  texView: false,     // enseñar la textura sobre el lienzo (X)
   sel565: 0xffcc00,   // colores nativos, cuando se edita un FPG de 16 bits
   buf: null,          // búfer local de píxeles del mapa activo
   off: null,          // lienzo fuera de pantalla con el búfer ya en RGBA
@@ -301,6 +308,15 @@ function applyDoc(j, opts) {
   // dejaría el anterior ocupando sitio hasta cerrar la aplicación.
   if (state.doc !== null && state.doc !== j.doc) closeDoc(state.doc);
 
+  // La textura es un mapa del documento que se está editando: al cambiar de
+  // fichero, la copia que había ya no vale. La punta de BRUSH.FPG, en cambio,
+  // es de otro fichero y se conserva.
+  if (state.doc !== j.doc) {
+    state.texMap = 0;
+    state.texImg = null;
+    state.texTile = null;
+  }
+
   if (reset) {
     state.undoStack = [];
     state.redoStack = [];
@@ -464,6 +480,9 @@ function renderMaps() {
     li.onclick = () => selectMap(m.id);
     list.append(li);
   }
+  // La lista de texturas sigue a la de mapas: si se añade, se borra o se
+  // renombra uno, aquí tiene que enterarse.
+  renderBrush();
 }
 
 function selectMap(id) {
@@ -587,6 +606,7 @@ function draw() {
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, cv.width, cv.height);
     ctx.drawImage(state.off.canvas, 0, 0, cv.width, cv.height);
+    drawTexture(ctx, buf.w, buf.h, z);
     $('emptyMsg').style.display = 'none';
     if (state.grid && z >= 3) drawGrid(ctx, buf.w, buf.h, z);
     drawFloat(ctx, z);
@@ -768,10 +788,243 @@ function sameBytes(a, b) {
   return true;
 }
 
+/* ---------------------------------------------------- pinceles y texturas */
+
+/* `SYSTEM\BRUSH.FPG` guarda las puntas del taller original, casi todas de
+   varios colores y con un dibujo propio. Se abre como un documento aparte, de
+   modo que no estorba al que se está editando, y solo se piden sus píxeles
+   cuando se elige una punta. */
+let brushLib = null;   // { doc, maps, palette, depth }
+
+/** Trae los píxeles de un mapa, para usarlo de punta o de textura. */
+async function readMapImage(doc, meta, depth) {
+  const bpp = bppOf(depth);
+  const raw = await Backend.raw('/api/pixels', { doc, id: meta.id, frame: 0 });
+  const need = Math.max(0, meta.width) * Math.max(0, meta.height) * bpp;
+  const data = new Uint8Array(need);
+  data.set(raw.subarray(0, Math.min(need, raw.length)));
+  return { w: meta.width, h: meta.height, depth, data };
+}
+
+/** Color (0-255 por canal) de un valor, según la profundidad y la paleta. */
+function colorOfValue(v, depth, palette) {
+  if (depth === 16) {
+    return [
+      (((v >> 11) & 31) * 255 / 31) | 0,
+      (((v >> 5) & 63) * 255 / 63) | 0,
+      ((v & 31) * 255 / 31) | 0,
+    ];
+  }
+  const c = (palette && palette[v]) || [0, 0, 0];
+  return [to8(c[0]), to8(c[1]), to8(c[2])];
+}
+
+/** Pasa un valor de una imagen a la profundidad y la paleta del mapa que se
+    está editando. Devuelve 0 si el original era transparente. */
+function valueForTarget(v, srcDepth, srcPalette, buf) {
+  if (!v) return 0;
+  if (srcDepth === buf.depth) {
+    // Mismo formato y misma paleta: el valor vale tal cual.
+    if (buf.depth === 16 || srcPalette === state.palette) return v;
+  }
+  const [r, g, b] = colorOfValue(v, srcDepth, srcPalette);
+  return buf.depth === 16 ? encode565(r, g, b) : nearestIndex(r, g, b);
+}
+
+/** Valor con el que se pinta en (px, py): el de siempre, o el que marque la
+    textura. Devuelve null donde la textura es transparente, para que el trazo
+    salga calado en vez de con agujeros negros. */
+function texValue(px, py, v) {
+  const t = state.texImg;
+  // Borrar no se texturiza: el valor 0 es «nada», y ahí no hay color que sacar.
+  if (!t || !state.texPaint || !v) return v;
+  const sx = ((px % t.w) + t.w) % t.w;
+  const sy = ((py % t.h) + t.h) % t.h;
+  const v2 = getPx(t, sx, sy);
+  return v2 === 0 ? null : v2;
+}
+
+/** Sella una punta cargada de BRUSH.FPG: cada píxel lleva su color y los
+    transparentes no pintan nada. */
+function stampBitmap(buf, cx, cy, touch) {
+  const bmp = state.brushImg;
+  const ox = Math.floor((bmp.w - 1) / 2);
+  const oy = Math.floor((bmp.h - 1) / 2);
+  for (let by = 0; by < bmp.h; by++) {
+    const py = cy - oy + by;
+    if (py < 0 || py >= buf.h) continue;
+    for (let bx = 0; bx < bmp.w; bx++) {
+      const px = cx - ox + bx;
+      if (px < 0 || px >= buf.w) continue;
+      const v = valueForTarget(getPx(bmp, bx, by), bmp.depth, brushLib && brushLib.palette, buf);
+      if (!v) continue;
+      if (state.dither && ((px + py) & 1)) continue;
+      setPx(buf, px, py, v);
+      if (touch) touch(px, py);
+    }
+  }
+}
+
+/** Pinta un píxel de un trazo, aplicando la textura si toca. `false` si la
+    textura era transparente en ese punto y no hay que pintar. */
+function paintPx(buf, px, py, v, touch) {
+  const pv = texValue(px, py, v);
+  if (pv === null) return false;
+  setPx(buf, px, py, pv);
+  if (touch) touch(px, py);
+  return true;
+}
+
+/* -------------------------------------------- puntas y estampas: interfaz */
+
+/** Abre BRUSH.FPG. En la web lo elige el navegador; en local, el diálogo. */
+function openBrushLib() {
+  if (enWeb()) {
+    elegirOrigen(['.fpg'], 'Abrir BRUSH.FPG').then((name) => { if (name) loadBrushLib(name); });
+    return;
+  }
+  openDialog({
+    mode: 'open',
+    title: 'Abrir BRUSH.FPG (puntas del taller)',
+    confirm: 'Abrir',
+    exts: ['.fpg'],
+    onPick: loadBrushLib,
+  });
+}
+
+/** Deja BRUSH.FPG abierto como documento aparte, solo para sacarle las puntas.
+    Así el fichero que se está editando no se toca. */
+async function loadBrushLib(path) {
+  let j;
+  try {
+    j = await api('/api/open', { path });
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  if (j.kind !== 'fpg') {
+    closeDoc(j.doc);
+    toast('Las puntas del taller vienen en un FPG (BRUSH.FPG)', true);
+    return;
+  }
+  if (brushLib) closeDoc(brushLib.doc);
+  brushLib = { doc: j.doc, maps: j.maps, palette: j.palette, depth: j.depth, name: j.name };
+  state.brushFpg = 0;
+  state.brushImg = null;
+  $('brushLibSel').dataset.sig = '';
+  renderBrush();
+  toast(`Puntas de «${j.name}» · elige una en la lista`);
+}
+
+/** Elige la punta activa y trae sus píxeles, que son los que se sellarán. */
+async function chooseBrushPunta(id) {
+  state.brushFpg = Number(id) || 0;
+  state.brushImg = null;
+  const meta = brushLib && brushLib.maps.find((m) => m.id === state.brushFpg);
+  if (meta) {
+    try {
+      state.brushImg = await readMapImage(brushLib.doc, meta, brushLib.depth);
+    } catch (e) {
+      toast(e.message, true);
+      state.brushFpg = 0;
+    }
+  }
+  renderBrush();
+}
+
+/** Elige el mapa que hace de textura. Se copia tal como esté ahora: retocarlo
+    después no cambia lo que ya se haya dado con él. */
+async function chooseTex(id) {
+  state.texMap = Number(id) || 0;
+  state.texImg = null;
+  state.texTile = null;
+  const m = state.maps.find((x) => x.id === state.texMap);
+  if (m && state.buf) {
+    try {
+      if (m.id === state.selected) {
+        // El mapa que se está editando ya está aquí; no hay que ir a buscarlo.
+        const b = state.buf;
+        state.texImg = { w: b.w, h: b.h, depth: b.depth, data: b.data.slice() };
+      } else {
+        state.texImg = await readMapImage(state.doc, m, state.info.depth);
+      }
+      state.texTile = blockToCanvas(state.texImg.w, state.texImg.h, state.texImg.depth, state.texImg.data);
+    } catch (e) {
+      toast(e.message, true);
+      state.texMap = 0;
+    }
+  }
+  draw();
+  renderBrush();
+}
+
+/** Refresca la barra de puntas y textura. */
+function renderBrush() {
+  const bar = $('brushbar');
+  if (!bar) return;
+  const hasBuf = !!state.buf;
+  bar.hidden = !hasBuf;
+  if (!hasBuf) return;
+
+  const lib = $('brushLibSel');
+  const puntas = brushLib ? brushLib.maps : [];
+  const lsig = puntas.map((m) => m.id).join(',');
+  if (lib.dataset.sig !== lsig) {
+    const prev = state.brushFpg;
+    lib.innerHTML = '';
+    lib.append(new Option('Normal (grosor)', '0'));
+    for (const m of puntas) lib.append(new Option(`${m.id} · ${m.name || 'mapa'}`, String(m.id)));
+    lib.dataset.sig = lsig;
+    lib.value = String(prev);
+  }
+
+  const tex = $('texSel');
+  const tsig = state.maps.map((m) => m.id).join(',');
+  if (tex.dataset.sig !== tsig) {
+    const prev = state.texMap;
+    tex.innerHTML = '';
+    tex.append(new Option('Ninguna', '0'));
+    for (const m of state.maps) {
+      tex.append(new Option(`${m.id} · ${m.name || 'mapa'} (${m.width}×${m.height})`, String(m.id)));
+    }
+    tex.dataset.sig = tsig;
+    tex.value = String(prev);
+  }
+
+  lib.value = String(state.brushFpg);
+  tex.value = String(state.texMap);
+  lib.disabled = !puntas.length;
+  tex.disabled = !state.maps.length;
+  $('texPaintChk').checked = state.texPaint;
+  $('texViewChk').checked = state.texView;
+  $('brushLibBtn').textContent = brushLib ? 'Cambiar BRUSH.FPG…' : 'Abrir BRUSH.FPG…';
+  $('brushHint').textContent = state.brushImg
+    ? 'La punta manda sobre el grosor.'
+    : brushLib
+      ? `${puntas.length} puntas de «${brushLib.name}»`
+      : 'Abre SYSTEM\\BRUSH.FPG para pintar con sus puntas.';
+}
+
+/** Repite la textura sobre el lienzo para imaginar la estampa (X). */
+function drawTexture(ctx, w, h, z) {
+  const tile = state.texTile;
+  if (!tile || !state.texView) return;
+  ctx.save();
+  ctx.globalAlpha = 0.45;
+  ctx.setTransform(z, 0, 0, z, 0, 0);
+  ctx.fillStyle = ctx.createPattern(tile, 'repeat');
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
 /** Sella la punta del pincel, de `size` píxeles, centrada en (x, y).
     Con la barra de punteado activa solo se marca uno de cada dos píxeles, en
     damero, que es como se hacen las medias tintas en 8 bits. */
 function stamp(buf, x, y, v, size, erase, touch) {
+  // Una punta traída de BRUSH.FPG trae su forma y sus colores: manda ella, y
+  // el grosor del pincel se deja a un lado. Al borrar se sigue usando la punta
+  // de siempre, que es la que sabe vaciar.
+  if (state.brushImg && !erase) { stampBitmap(buf, x, y, touch); return; }
   const half = Math.floor((size - 1) / 2);
   const off = (size - 1) / 2;
   const round = state.brushShape === 'round';
@@ -790,8 +1043,7 @@ function stamp(buf, x, y, v, size, erase, touch) {
       const px = x - half + dx;
       if (px < 0 || px >= buf.w) continue;
       if (state.dither && ((px + py) & 1)) continue;
-      setPx(buf, px, py, erase ? 0 : v);
-      if (touch) touch(px, py);
+      paintPx(buf, px, py, erase ? 0 : v, touch);
     }
   }
 }
@@ -825,8 +1077,7 @@ function drawRectShape(buf, x0, y0, x1, y1, v, fill, touch) {
       if (x < 0 || x >= buf.w) continue;
       if (!fill && x > xa && x < xb && y > ya && y < yb) continue;
       if (state.dither && ((x + y) & 1)) continue;
-      setPx(buf, x, y, v);
-      touch(x, y);
+      paintPx(buf, x, y, v, touch);
     }
   }
 }
@@ -846,8 +1097,7 @@ function drawEllipseShape(buf, x0, y0, x1, y1, v, fill, touch) {
     y = Math.round(y);
     if (x < 0 || y < 0 || x >= buf.w || y >= buf.h) return;
     if (state.dither && ((x + y) & 1)) return;
-    setPx(buf, x, y, v);
-    touch(x, y);
+    paintPx(buf, x, y, v, touch);
   };
   for (let y = ya; y <= yb; y++) {
     const t = 1 - ((y - cy) / ry) ** 2;
@@ -1119,8 +1369,7 @@ function spray(buf, x, y, v, touch) {
     const px = Math.round(x + Math.cos(angle) * dist);
     const py = Math.round(y + Math.sin(angle) * dist);
     if (px < 0 || py < 0 || px >= buf.w || py >= buf.h) continue;
-    setPx(buf, px, py, v);
-    if (touch) touch(px, py);
+    paintPx(buf, px, py, v, touch);
   }
 }
 
@@ -1790,6 +2039,7 @@ function renderPaint() {
   $('textActions').hidden = !(hasBuf && state.tool === 'text');
   $('pathActions').hidden = !state.path;
   renderLayers();
+  renderBrush();
 
   const cv = $('view');
   const pintan = ['pencil', 'brush', 'eraser', 'air', 'fill', 'blur', 'line', 'rect', 'ellipse'];
@@ -3047,6 +3297,10 @@ function onKey(ev) {
       return;
     }
     if (ev.key.toLowerCase() === 'k') { ev.preventDefault(); copyToWindow(); return; }
+    // U y X son las teclas de la textura en el taller de DIV: pintar con ella y
+    // verla repetida sobre el lienzo.
+    if (ev.key.toLowerCase() === 'u') { $('texPaintChk').click(); return; }
+    if (ev.key.toLowerCase() === 'x') { $('texViewChk').click(); return; }
     const tools = {
       v: 'view', p: 'pencil', b: 'brush', e: 'eraser', a: 'air', f: 'fill', i: 'pick',
       l: 'line', r: 'rect', o: 'ellipse', s: 'select',
@@ -3099,6 +3353,20 @@ function wire() {
   $('btnImport').onclick = importDialog;
   $('btnPanel').onclick = toggleInspector;
   $('btnToWindow').onclick = copyToWindow;
+
+  // Puntas de BRUSH.FPG y pintura con textura.
+  $('brushLibBtn').onclick = openBrushLib;
+  $('brushLibSel').onchange = (e) => chooseBrushPunta(e.target.value);
+  $('texSel').onchange = (e) => chooseTex(e.target.value);
+  $('texPaintChk').onchange = (e) => {
+    state.texPaint = e.target.checked;
+    renderBrush();
+  };
+  $('texViewChk').onchange = (e) => {
+    state.texView = e.target.checked;
+    draw();
+    renderBrush();
+  };
 
   $('tabs').onclick = (e) => {
     const b = e.target.closest('.tab');

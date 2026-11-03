@@ -277,9 +277,10 @@ body.no-inspector .inspector { display: none; }
    el color de 16 bits se vería también al editar mapas de 8 bits. */
 .paintbar .numbox[hidden] { display: none; }
 
-/* --- capas --- */
+/* --- capas, puntas y textura --- */
 
-.layerbar {
+.layerbar,
+.brushbar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -289,14 +290,17 @@ body.no-inspector .inspector { display: none; }
   font-size: 12px;
   flex-wrap: wrap;
 }
-.layerbar[hidden] { display: none; }
-.layerbar .layertitle {
+.layerbar[hidden],
+.brushbar[hidden] { display: none; }
+.layerbar .layertitle,
+.brushbar .layertitle {
   text-transform: uppercase;
   letter-spacing: .06em;
   font-size: 10.5px;
   color: var(--ink-soft);
 }
-.layerbar select {
+.layerbar select,
+.brushbar select {
   font-family: var(--mono);
   font-size: 12px;
   min-width: 120px;
@@ -307,7 +311,9 @@ body.no-inspector .inspector { display: none; }
   background: #fff;
   color: var(--ink);
 }
-.layerbar .float-hint { font-size: 11px; color: var(--ink-soft); }
+.layerbar .float-hint,
+.brushbar .float-hint { font-size: 11px; color: var(--ink-soft); }
+.brushbar .chk { display: flex; align-items: center; gap: 4px; color: var(--ink-soft); }
 
 .selactions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .selactions[hidden] { display: none; }
