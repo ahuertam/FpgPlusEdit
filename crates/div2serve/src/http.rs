@@ -4,63 +4,16 @@
 //! responder y no usa `chunked`: las respuestas siempre llevan
 //! `Content-Length`, y las peticiones del navegador llegan con `Content-Length`
 //! al enviar binario con `fetch`.
+//!
+//! La petición y la respuesta son las mismas que usa el núcleo ([`div2core`]),
+//! para que el enrutado sea idéntico al de la versión web.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
-/// Petición ya leída y descompuesta.
-pub struct Request {
-    pub method: String,
-    pub path: String,
-    pub query: HashMap<String, String>,
-    pub body: Vec<u8>,
-}
-
-/// Respuesta lista para enviar.
-pub struct Resp {
-    pub status: u16,
-    pub ctype: String,
-    pub body: Vec<u8>,
-}
-
-impl Resp {
-    pub fn json(status: u16, body: String) -> Resp {
-        Resp {
-            status,
-            ctype: "application/json; charset=utf-8".to_string(),
-            body: body.into_bytes(),
-        }
-    }
-
-    pub fn png(body: Vec<u8>) -> Resp {
-        Resp {
-            status: 200,
-            ctype: "image/png".to_string(),
-            body,
-        }
-    }
-
-    /// Respuesta binaria en crudo (búferes de píxeles, por ejemplo).
-    pub fn bytes(ctype: &str, body: Vec<u8>) -> Resp {
-        Resp {
-            status: 200,
-            ctype: ctype.to_string(),
-            body,
-        }
-    }
-
-    pub fn ok() -> Resp {
-        Resp::json(200, "{\"ok\":true}".to_string())
-    }
-
-    pub fn err(status: u16, msg: &str) -> Resp {
-        Resp::json(
-            status,
-            format!("{{\"ok\":false,\"error\":{}}}", jstr(msg)),
-        )
-    }
-}
+pub use div2core::percent_decode;
+pub use div2core::{Request, Resp};
 
 fn reason(status: u16) -> &'static str {
     match status {
@@ -148,59 +101,6 @@ fn parse_target(target: &str) -> (String, HashMap<String, String>) {
         query.insert(percent_decode(k), percent_decode(v));
     }
     (percent_decode(raw_path), query)
-}
-
-/// Decodifica `%XX` y `+` de una cadena de URL.
-pub fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hi = (bytes[i + 1] as char).to_digit(16);
-                let lo = (bytes[i + 2] as char).to_digit(16);
-                match (hi, lo) {
-                    (Some(h), Some(l)) => {
-                        out.push((h * 16 + l) as u8);
-                        i += 3;
-                    }
-                    _ => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Escapa una cadena para incrustarla en JSON entre comillas.
-pub fn jstr(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
 }
 
 /// Tipo MIME por extensión (los que sirve la interfaz).

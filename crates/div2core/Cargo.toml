@@ -1,0 +1,9 @@
+[package]
+name = "div2core"
+description = "Lógica de edición de los recursos de DIV Games Studio 2, compartida por el editor local y la versión web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+div2fmt = { path = "../div2fmt" }

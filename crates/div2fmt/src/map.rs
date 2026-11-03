@@ -26,6 +26,27 @@ pub struct Map {
 }
 
 impl Map {
+    /// Crea un mapa vacío (píxeles a cero) de las dimensiones indicadas.
+    pub fn new(width: i16, height: i16, code: u32, depth: u8, palette: Option<Palette>) -> Map {
+        let bpp = if depth == 16 { 2 } else { 1 };
+        let len = (width.max(0) as usize) * (height.max(0) as usize) * bpp;
+        Map {
+            width,
+            height,
+            code,
+            name_raw: [0u8; MAP_NAME_LEN],
+            depth,
+            palette: if depth == 8 {
+                palette.or_else(|| Some(Palette::new()))
+            } else {
+                None
+            },
+            points: Vec::new(),
+            animation: None,
+            pixels: vec![0u8; len],
+        }
+    }
+
     /// Nombre recortado en el primer NUL.
     pub fn name(&self) -> String {
         name_str(&self.name_raw)

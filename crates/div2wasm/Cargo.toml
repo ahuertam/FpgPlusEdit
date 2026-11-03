@@ -1,0 +1,12 @@
+[package]
+name = "div2wasm"
+description = "Versión web del editor: el núcleo de edición (div2core) compilado a WebAssembly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+div2core = { path = "../div2core" }

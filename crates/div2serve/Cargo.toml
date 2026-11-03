@@ -10,4 +10,4 @@ name = "fpgplusedit"
 path = "src/main.rs"
 
 [dependencies]
-div2fmt = { path = "../div2fmt" }
+div2core = { path = "../div2core" }

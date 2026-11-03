@@ -53,7 +53,8 @@ $files = @(
     @{ Src = Join-Path $root "LICENSE"; Dst = Join-Path $outDir "LICENSE" },
     @{ Src = Join-Path $root "web\index.html"; Dst = Join-Path $webOut "index.html" },
     @{ Src = Join-Path $root "web\style.css"; Dst = Join-Path $webOut "style.css" },
-    @{ Src = Join-Path $root "web\app.js"; Dst = Join-Path $webOut "app.js" }
+    @{ Src = Join-Path $root "web\app.js"; Dst = Join-Path $webOut "app.js" },
+    @{ Src = Join-Path $root "web\backend.js"; Dst = Join-Path $webOut "backend.js" }
 )
 
 foreach ($file in $files) {

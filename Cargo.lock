@@ -75,6 +75,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "div2core"
+version = "0.1.0"
+dependencies = [
+ "div2fmt",
+]
+
+[[package]]
 name = "div2fmt"
 version = "0.1.0"
 dependencies = [
@@ -96,7 +103,14 @@ dependencies = [
 name = "div2serve"
 version = "0.1.0"
 dependencies = [
- "div2fmt",
+ "div2core",
+]
+
+[[package]]
+name = "div2wasm"
+version = "0.1.0"
+dependencies = [
+ "div2core",
 ]
 
 [[package]]

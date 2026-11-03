@@ -5,6 +5,7 @@
 //! y FNT. Al arrancar abre el navegador en la página del editor.
 
 mod api;
+mod fs;
 mod http;
 mod static_files;
 

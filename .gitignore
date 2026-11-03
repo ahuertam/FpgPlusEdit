@@ -10,3 +10,6 @@ Desktop.ini
 *.tmp
 *.bak
 *.orig
+
+# Ficheros que sueltan las pruebas manuales del editor en la raiz.
+/NUEVO.FPG

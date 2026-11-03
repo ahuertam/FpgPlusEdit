@@ -229,7 +229,7 @@ fn median_cut(pixels: &[[u8; 3]], max: usize) -> Vec<[u8; 3]> {
 // Detección de formato
 // ---------------------------------------------------------------------------
 
-fn detect_from_bytes(bytes: &[u8], path: &Path) -> Result<ImageFormat> {
+fn detect_from_bytes(bytes: &[u8], name: &str) -> Result<ImageFormat> {
     if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
         return Ok(ImageFormat::Png);
     }
@@ -242,9 +242,9 @@ fn detect_from_bytes(bytes: &[u8], path: &Path) -> Result<ImageFormat> {
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
         return Ok(ImageFormat::Jpeg);
     }
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
+    let ext = name
+        .rsplit('.')
+        .next()
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
@@ -253,8 +253,7 @@ fn detect_from_bytes(bytes: &[u8], path: &Path) -> Result<ImageFormat> {
         "pcx" => Ok(ImageFormat::Pcx),
         "jpg" | "jpeg" => Ok(ImageFormat::Jpeg),
         _ => Err(Error::Unsupported(format!(
-            "no se reconoce el formato de {}",
-            path.display()
+            "no se reconoce el formato de {name}"
         ))),
     }
 }
@@ -262,16 +261,58 @@ fn detect_from_bytes(bytes: &[u8], path: &Path) -> Result<ImageFormat> {
 /// Detecta el formato de un fichero de imagen por su firma (y extensión).
 pub fn detect_format(path: &Path) -> Result<ImageFormat> {
     let bytes = std::fs::read(path)?;
-    detect_from_bytes(&bytes, path)
+    detect_from_bytes(&bytes, &path.to_string_lossy())
+}
+
+/// Indica si `name` (un nombre o ruta) parece una imagen de las soportadas.
+///
+/// Solo mira la extensión; sirve para saber si merece la pena intentar
+/// decodificar unos bytes, no para decidir el formato.
+pub fn looks_like_image(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str(),
+        "png" | "bmp" | "pcx" | "jpg" | "jpeg"
+    )
+}
+
+fn decode_bytes(bytes: &[u8], name: &str) -> Result<Decoded> {
+    match detect_from_bytes(bytes, name)? {
+        ImageFormat::Png => decode_png(bytes),
+        ImageFormat::Bmp => decode_bmp(bytes),
+        ImageFormat::Pcx => decode_pcx(bytes),
+        ImageFormat::Jpeg => decode_jpeg(bytes),
+    }
 }
 
 fn decode_file(path: &Path) -> Result<Decoded> {
     let bytes = std::fs::read(path)?;
-    match detect_from_bytes(&bytes, path)? {
-        ImageFormat::Png => decode_png(&bytes),
-        ImageFormat::Bmp => decode_bmp(&bytes),
-        ImageFormat::Pcx => decode_pcx(&bytes),
-        ImageFormat::Jpeg => decode_jpeg(&bytes),
+    decode_bytes(&bytes, &path.to_string_lossy())
+}
+
+/// Decodifica unos bytes de imagen y los devuelve en RGBA8.
+///
+/// `name` solo aporta la extensión cuando la firma no basta. Es la variante
+/// en memoria de [`read_rgba`]: el navegador no tiene rutas de fichero, así
+/// que la imagen llega como bytes.
+pub fn decode_image_rgba(bytes: &[u8], name: &str) -> Result<RgbaImage> {
+    match decode_bytes(bytes, name)? {
+        Decoded::Rgba(r) => Ok(r),
+        Decoded::Indexed(ix) => Ok(indexed_to_rgba(&ix)),
+    }
+}
+
+/// Decodifica unos bytes de imagen y los devuelve como imagen indexada.
+///
+/// Si trae paleta propia se usa; si es truecolor se cuantiza a 256 colores
+/// (`hint` permite reutilizar una paleta existente).
+pub fn decode_image_indexed(
+    bytes: &[u8],
+    name: &str,
+    hint: Option<&Palette>,
+) -> Result<IndexedImage> {
+    match decode_bytes(bytes, name)? {
+        Decoded::Indexed(ix) => Ok(ix),
+        Decoded::Rgba(r) => Ok(rgba_to_indexed(&r, hint)),
     }
 }
 
@@ -418,6 +459,11 @@ pub fn write_png(path: &Path, img: &RgbaImage) -> Result<()> {
     Ok(())
 }
 
+/// Codifica una imagen indexada como PNG en RGBA8 (índice 0 transparente).
+pub fn encode_indexed_png(img: &IndexedImage) -> Result<Vec<u8>> {
+    encode_png(&indexed_to_rgba(img))
+}
+
 /// Escribe una imagen indexada como PNG en RGBA8.
 pub fn write_indexed_png(path: &Path, img: &IndexedImage) -> Result<()> {
     write_png(path, &indexed_to_rgba(img))
@@ -502,8 +548,8 @@ fn decode_bmp(bytes: &[u8]) -> Result<Decoded> {
     }
 }
 
-/// Escribe BMP de 8 bits indexado (256 colores, filas alineadas a 4 bytes, bottom-up).
-pub fn write_bmp(path: &Path, img: &IndexedImage) -> Result<()> {
+/// Codifica BMP de 8 bits indexado (256 colores, filas alineadas a 4 bytes, bottom-up).
+pub fn encode_bmp(img: &IndexedImage) -> Vec<u8> {
     let w = img.width as usize;
     let h = img.height as usize;
     let row_size = (w + 3) / 4 * 4;
@@ -542,7 +588,12 @@ pub fn write_bmp(path: &Path, img: &IndexedImage) -> Result<()> {
         out.extend_from_slice(&img.indices[row * w..row * w + w]);
         out.extend(std::iter::repeat(0u8).take(row_size - w));
     }
-    std::fs::write(path, out)?;
+    out
+}
+
+/// Escribe BMP de 8 bits indexado (256 colores, filas alineadas a 4 bytes, bottom-up).
+pub fn write_bmp(path: &Path, img: &IndexedImage) -> Result<()> {
+    std::fs::write(path, encode_bmp(img))?;
     Ok(())
 }
 
@@ -638,8 +689,8 @@ fn pcx_rle(data: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Escribe PCX de 8 bits con RLE y paleta de 256 colores.
-pub fn write_pcx(path: &Path, img: &IndexedImage) -> Result<()> {
+/// Codifica PCX de 8 bits con RLE y paleta de 256 colores.
+pub fn encode_pcx(img: &IndexedImage) -> Vec<u8> {
     let w = img.width as usize;
     let h = img.height as usize;
     let bytes_per_line = (w + 1) / 2 * 2;
@@ -676,7 +727,12 @@ pub fn write_pcx(path: &Path, img: &IndexedImage) -> Result<()> {
         out.push(g);
         out.push(b);
     }
-    std::fs::write(path, out)?;
+    out
+}
+
+/// Escribe PCX de 8 bits con RLE y paleta de 256 colores.
+pub fn write_pcx(path: &Path, img: &IndexedImage) -> Result<()> {
+    std::fs::write(path, encode_pcx(img))?;
     Ok(())
 }
 
@@ -737,8 +793,8 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Decoded> {
     }))
 }
 
-/// Escribe una imagen RGBA como JPEG con la calidad indicada (0..=100).
-pub fn write_jpeg(path: &Path, img: &RgbaImage, quality: u8) -> Result<()> {
+/// Codifica una imagen RGBA como JPEG con la calidad indicada (0..=100).
+pub fn encode_jpeg(img: &RgbaImage, quality: u8) -> Result<Vec<u8>> {
     use jpeg_encoder::{ColorType, Encoder};
     let mut rgb = vec![0u8; img.width as usize * img.height as usize * 3];
     for (i, px) in img.data.chunks_exact(4).enumerate() {
@@ -756,6 +812,11 @@ pub fn write_jpeg(path: &Path, img: &RgbaImage, quality: u8) -> Result<()> {
             ColorType::Rgb,
         )
         .map_err(|e| Error::InvalidData(format!("JPEG: {e}")))?;
-    std::fs::write(path, out)?;
+    Ok(out)
+}
+
+/// Escribe una imagen RGBA como JPEG con la calidad indicada (0..=100).
+pub fn write_jpeg(path: &Path, img: &RgbaImage, quality: u8) -> Result<()> {
+    std::fs::write(path, encode_jpeg(img, quality)?)?;
     Ok(())
 }
