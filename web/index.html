@@ -57,6 +57,7 @@
       </label>
       <label class="chk"><input id="gridChk" type="checkbox"> Rejilla</label>
       <span class="spacer"></span>
+      <button id="btnToWindow" class="mini" disabled title="Abrir el gráfico en una ventana aparte (K)">A ventana</button>
       <button id="btnPanel" class="mini" title="Mostrar u ocultar el inspector">Inspector ▸</button>
     </div>
 
@@ -73,9 +74,15 @@
         <button type="button" class="tool" data-tool="line" title="Línea (L)">Línea</button>
         <button type="button" class="tool" data-tool="rect" title="Rectángulo (R)">Rect.</button>
         <button type="button" class="tool" data-tool="ellipse" title="Elipse (O)">Elipse</button>
+        <button type="button" class="tool" data-tool="multiline" title="Multilínea (F4): un clic por vértice; Intro para cerrar el trazo">Multilínea</button>
+        <button type="button" class="tool" data-tool="bezier" title="Curva de Bézier (F5): cuatro clics (inicio, dos controles y final)">Bézier</button>
+        <button type="button" class="tool" data-tool="multicurve" title="Multicurva (F6): curvas encadenadas; Intro para cerrar el trazo">Multicurva</button>
+        <button type="button" class="tool" data-tool="text" title="Texto (Shift+F1): escribe y haz clic donde quieras estamparlo">Texto</button>
+        <button type="button" class="tool" data-tool="blur" title="Difuminar (D): promedia lo que se pinta encima">Difuminar</button>
         <button type="button" class="tool" data-tool="select" title="Selección (S)">Selec.</button>
       </div>
       <label class="chk"><input id="fillChk" type="checkbox"> Relleno</label>
+      <label class="chk"><input id="ditherChk" type="checkbox"> Punteado</label>
       <label class="numbox">Grosor <input id="brushSize" type="number" min="1" max="16" value="1"></label>
       <label class="numbox">Punta
         <select id="brushShape">
@@ -104,6 +111,18 @@
         </label>
         <button type="button" id="floatOk" class="mini" title="Fijar el trozo sobre el mapa (Intro)">Anclar</button>
         <button type="button" id="floatCancel" class="mini" title="Descartar (Esc)">Cancelar</button>
+      </div>
+      <div class="selactions" id="textActions" hidden>
+        <label class="numbox">Texto
+          <input id="textInput" type="text" spellcheck="false" value="TEXTO" title="Texto a estampar">
+        </label>
+        <label class="numbox">Tamaño <input id="textSize" type="number" min="6" max="72" step="1" value="14"></label>
+        <span class="float-hint">Haz clic en el lienzo para estamparlo</span>
+      </div>
+      <div class="selactions" id="pathActions" hidden>
+        <span class="float-hint">Clic para añadir puntos</span>
+        <button type="button" id="pathOk" class="mini" title="Cerrar el trazo (Intro)">Terminar</button>
+        <button type="button" id="pathCancel" class="mini" title="Descartar el trazo (Esc)">Cancelar</button>
       </div>
     </div>
 
@@ -148,6 +167,47 @@
           </div>
           <p class="hint">El id 0 (transparencia) también puede editarse, como en DIV.</p>
         </div>
+
+        <div class="editgroup separated">
+          <h3 class="group-title">Crear y transformar</h3>
+          <div class="point-grid duo">
+            <label>Ancho <input id="mapW" type="number" min="1" max="4096" step="1"></label>
+            <label>Alto <input id="mapH" type="number" min="1" max="4096" step="1"></label>
+          </div>
+          <label>Anclaje
+            <select id="mapAnchor">
+              <option value="tl">Arriba izq.</option>
+              <option value="tc">Arriba centro</option>
+              <option value="tr">Arriba dcha.</option>
+              <option value="ml">Centro izq.</option>
+              <option value="mc" selected>Centro</option>
+              <option value="mr">Centro dcha.</option>
+              <option value="bl">Abajo izq.</option>
+              <option value="bc">Abajo centro</option>
+              <option value="br">Abajo dcha.</option>
+            </select>
+          </label>
+          <div class="edit-actions">
+            <button id="mapNewBtn" class="btn ghost small" disabled title="Añade un mapa vacío del tamaño indicado (solo FPG)">Nuevo</button>
+            <button id="mapDupBtn" class="btn ghost small" disabled title="Duplica el mapa seleccionado (solo FPG)">Duplicar</button>
+            <button id="mapResizeBtn" class="btn small" disabled title="Cambia el tamaño del mapa; lo que no quepa se recorta">Redimensionar</button>
+            <button id="mapSplitBtn" class="btn ghost small" disabled title="Trocea el mapa seleccionado en baldosas del tamaño indicado (solo FPG)">Trocear</button>
+          </div>
+          <p class="hint" id="mapStructHint">Selecciona un mapa para transformarlo.</p>
+        </div>
+
+        <div class="editgroup separated" id="muralGroup" hidden>
+          <h3 class="group-title">Mural del FPG</h3>
+          <div class="mural-preview" id="muralPreview">
+            <img id="muralImg" alt="">
+            <span class="mural-empty">Pulsa «Ver tapiz»</span>
+          </div>
+          <div class="edit-actions">
+            <button id="muralViewBtn" class="btn ghost small" disabled>Ver tapiz</button>
+            <button id="muralMakeBtn" class="btn small" disabled>Crear mapa del mural</button>
+          </div>
+          <p class="hint">Coloca todos los mapas del FPG en filas, como un tapiz, dentro de un solo mapa.</p>
+        </div>
       </section>
 
       <section class="pane" data-pane="points">
@@ -161,7 +221,7 @@
           <div class="edit-actions">
             <button id="ptApply" class="btn small" disabled>Aplicar</button>
             <button id="ptUndefined" class="btn ghost small" disabled>Indefinido</button>
-            <button id="ptPick" class="btn ghost small" disabled>Usar clic</button>
+            <button id="ptPick" class="btn ghost small" disabled title="Colocar el punto activo con el clic; arrastra un punto existente para moverlo (Shift+F2)">Usar clic</button>
           </div>
           <p class="hint" id="ptHint">Selecciona un mapa para editar sus puntos de control.</p>
         </div>
@@ -230,6 +290,7 @@
   </div>
 </div>
 
+<script src="backend.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

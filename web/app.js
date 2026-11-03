@@ -1,5 +1,9 @@
 /* FPG+ Edit — editor de recursos gráficos de DIV Games Studio 2.
-   Interfaz sin dependencias: habla con el servidor local por /api/. */
+   Interfaz sin dependencias. No habla directamente con nadie: todo pasa por
+   `Backend` (backend.js), que decide si las peticiones las atiende el servidor
+   local o el núcleo WebAssembly. Aquí no hace falta saber cuál de los dos es,
+   salvo en los pocos sitios donde la versión web no puede hacer lo mismo (no
+   hay carpetas que listar), y esos van marcados con `enWeb()`. */
 
 'use strict';
 
@@ -39,6 +43,9 @@ const state = {
   brush: 1,           // grosor del pincel y la goma
   brushShape: 'round',// forma de la punta: redonda o cuadrada
   fillShape: false,   // rectángulos y elipses rellenos
+  dither: false,      // barra de punteado: los trazos van a cuadros
+  text: 'TEXTO',      // texto que estampa la herramienta de texto
+  textSize: 14,       // cuerpo del texto, en píxeles
   sel565: 0xffcc00,   // colores nativos, cuando se edita un FPG de 16 bits
   buf: null,          // búfer local de píxeles del mapa activo
   off: null,          // lienzo fuera de pantalla con el búfer ya en RGBA
@@ -46,6 +53,7 @@ const state = {
   sel: null,          // rectángulo de selección, en coordenadas de imagen
   float: null,        // trozo flotante a la espera de anclarse
   drag: null,         // gesto en curso
+  path: null,         // trazo en curso de multilínea, bézier o multicurva
   airTimer: null,     // temporizador del aerógrafo, mientras se mantiene pulsado
   layers: null,       // capas de edición; null = mapa de una sola capa
   layer: 0,           // índice de la capa activa
@@ -53,21 +61,11 @@ const state = {
 
 /* ------------------------------------------------------------------ apoyo */
 
-async function api(path, params, opts) {
-  const url = new URL(path, location.origin);
-  for (const [k, v] of Object.entries(params || {})) {
-    if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v);
-  }
-  const res = await fetch(url, opts);
-  let j;
-  try {
-    j = await res.json();
-  } catch {
-    throw new Error(`respuesta no válida del servidor (HTTP ${res.status})`);
-  }
-  if (!j.ok) throw new Error(j.error || `error HTTP ${res.status}`);
-  return j;
-}
+/** Una llamada al editor. Devuelve el JSON ya comprobado, o lanza el error. */
+const api = (path, params, opts) => Backend.api(path, params, opts);
+
+/** `true` cuando no hay servidor detrás y todo lo resuelve el navegador. */
+const enWeb = () => Backend.mode === 'web';
 
 let toastTimer = null;
 function toast(msg, bad) {
@@ -107,6 +105,24 @@ function currentPoint() {
   if (!m || !m.points || !m.points.length) return [-1, -1];
   const i = clamp(state.pointIndex, 0, m.points.length - 1);
   return m.points[i] || [-1, -1];
+}
+
+/** Índice del punto de control que queda bajo el cursor, o -1 si no hay
+    ninguno cerca. El margen se mide en píxeles de pantalla, de modo que vale
+    lo mismo con cualquier aumento. */
+function controlPointAt(p) {
+  const m = currentMap();
+  if (!m || !m.points) return -1;
+  const z = state.zoom;
+  let mejor = -1;
+  let margen = 7;
+  for (let i = 0; i < m.points.length; i++) {
+    const [x, y] = m.points[i];
+    if (x < 0 || y < 0) continue;
+    const d = Math.hypot((x - p.x) * z, (y - p.y) * z);
+    if (d <= margen) { margen = d; mejor = i; }
+  }
+  return mejor;
 }
 
 /* ------------------------------------------------------- diálogo de fichero */
@@ -190,6 +206,40 @@ async function confirmDialog() {
   if (pick) await pick(path, extra);
 }
 
+/* La versión web no tiene carpetas que listar: el fichero lo elige el propio
+   navegador. Estas dos ayudas envuelven sus selectores y devuelven lo mismo que
+   el diálogo de arriba, un nombre de fichero, para que las funciones de abrir y
+   guardar no tengan que enterarse de dónde ha salido. */
+
+/** Nombre del fichero elegido para abrir, ya «a la vista» del núcleo. */
+async function elegirOrigen(exts, title, readOnly) {
+  try {
+    return await Backend.pickOpen({ exts, title, readOnly });
+  } catch (e) {
+    toast(e.message, true);
+    return null;
+  }
+}
+
+/** Destino elegido para guardar; con él se llama a `then`. */
+async function elegirDestino(name, exts, title, then) {
+  let chosen = null;
+  try {
+    chosen = await Backend.pickSave({ name, exts, title });
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  if (chosen) await then(withExt(chosen, exts));
+}
+
+/** Los selectores del navegador no siempre añaden la extensión: si el usuario
+    escribe el nombre sin ella, se pone aquí, para que el fichero se reconozca. */
+function withExt(name, exts) {
+  const low = name.toLowerCase();
+  return exts.some((x) => low.endsWith(x)) ? name : name + (exts[0] || '');
+}
+
 /** Extensión propia de un tipo de documento, para el filtro del diálogo. */
 const extOf = (kind) => ({ fpg: '.fpg', map: '.map', pal: '.pal', fnt: '.fnt' })[kind] || '';
 
@@ -265,6 +315,12 @@ function applyDoc(j, opts) {
   state.palette = j.palette || [];
   state.maps = [];
 
+  // Los PNG de las miniaturas anteriores ya no valen: puede ser otro documento
+  // o el mismo con la paleta retocada, y en la versión web son URLs de objeto
+  // que hay que soltar. A partir de aquí se vuelven a pedir al núcleo.
+  releaseThumbs();
+  releaseMural();
+
   if (j.kind === 'fnt') {
     state.maps = (j.glyphs || [])
       .filter((g) => g.w > 0 && g.h > 0)
@@ -274,13 +330,9 @@ function applyDoc(j, opts) {
         width: g.w,
         height: g.h,
         frames: 1,
-        thumb: `/api/glyph?doc=${j.doc}&ch=${g.ch}`,
       }));
   } else if (j.maps) {
-    state.maps = j.maps.map((m) => ({
-      ...m,
-      thumb: `/api/image?doc=${j.doc}&id=${m.id}`,
-    }));
+    state.maps = j.maps.map((m) => ({ ...m }));
   }
 
   if (!keepSel || state.selected === null || !state.maps.some((m) => m.id === state.selected)) {
@@ -311,6 +363,76 @@ function labelGlyph(ch) {
 
 /* ------------------------------------------------------------- lista mapas */
 
+/* Las miniaturas de la tira de mapas (y el glifo del lienzo) son las únicas
+   imágenes que pide la interfaz. En la versión local el navegador las cachea
+   por URL; en la web cada una es un PNG que devuelve el núcleo y que hay que
+   envolver en una URL de objeto, que alguien tiene que soltar. De eso se
+   encarga esta caché: se pide una vez por documento y mapa, y se suelta cuando
+   el PNG que representaba deja de ser válido (otro documento, un cambio de
+   paleta, píxeles editados). */
+
+const thumbCache = new Map(); // «doc:id» → URL
+
+/** Clave de la miniatura de un mapa o glifo. */
+const thumbKey = (doc, id) => `${doc}:${id}`;
+
+/** Suelta la URL de una miniatura para que se vuelva a pedir. */
+function releaseThumb(doc, id) {
+  const key = thumbKey(doc, id);
+  const url = thumbCache.get(key);
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  thumbCache.delete(key);
+}
+
+/** Suelta todas: el documento o su aspecto han cambiado de golpe. */
+function releaseThumbs() {
+  for (const url of thumbCache.values()) URL.revokeObjectURL(url);
+  thumbCache.clear();
+}
+
+/* La vista previa del mural es otra imagen que en la web vive en una URL de
+   objeto. Solo se pide cuando el usuario pulsa «Ver tapiz», pero se suelta en
+   cuanto el documento cambia, que es cuando esa previsualización deja de valer. */
+let muralUrl = null;
+
+function releaseMural() {
+  const img = $('muralImg');
+  if (img) img.removeAttribute('src');
+  const box = $('muralPreview');
+  if (box) box.classList.remove('has-mural');
+  if (muralUrl) {
+    URL.revokeObjectURL(muralUrl);
+    muralUrl = null;
+  }
+}
+
+/** Dirección de la miniatura, pidiéndola al núcleo solo la primera vez. */
+async function thumbUrl(doc, id) {
+  const key = thumbKey(doc, id);
+  const cached = thumbCache.get(key);
+  if (cached) return cached;
+  const url = state.kind === 'fnt'
+    ? await Backend.imageUrl('/api/glyph', { doc, ch: id })
+    : await Backend.imageUrl('/api/image', { doc, id });
+  if (url) thumbCache.set(key, url);
+  return url;
+}
+
+/** Pinta la miniatura cuando llega. Si para entonces ya se está viendo otro
+    documento, o la tira de mapas se ha vuelto a dibujar, se descarta. */
+async function fillThumb(img, id) {
+  const doc = state.doc;
+  let url = '';
+  try {
+    url = await thumbUrl(doc, id);
+  } catch {
+    return;
+  }
+  if (!url || state.doc !== doc || !img.isConnected) return;
+  img.src = url;
+}
+
 function renderMaps() {
   const list = $('mapList');
   list.innerHTML = '';
@@ -321,9 +443,9 @@ function renderMaps() {
     if (m.id === state.selected) li.classList.add('sel');
 
     const img = document.createElement('img');
-    img.src = m.thumb;
     img.alt = '';
     img.loading = 'lazy';
+    fillThumb(img, m.id);
 
     const box = document.createElement('div');
     box.className = 'minfo';
@@ -392,7 +514,10 @@ async function loadCanvas() {
   }
   if (state.kind === 'fnt') {
     state.buf = null;
-    state.image = await loadImageEl(`/api/glyph?doc=${state.doc}&ch=${state.selected ?? 0}&t=${Date.now()}`);
+    // El mismo glifo que enseña su miniatura en la tira, así que se aprovecha
+    // la URL que ya esté pedida.
+    const url = await thumbUrl(state.doc, state.selected ?? 0);
+    state.image = url ? await loadImageEl(url) : null;
     prepareOffscreen();
     draw();
     renderPaint();
@@ -643,7 +768,9 @@ function sameBytes(a, b) {
   return true;
 }
 
-/** Sella la punta del pincel, de `size` píxeles, centrada en (x, y). */
+/** Sella la punta del pincel, de `size` píxeles, centrada en (x, y).
+    Con la barra de punteado activa solo se marca uno de cada dos píxeles, en
+    damero, que es como se hacen las medias tintas en 8 bits. */
 function stamp(buf, x, y, v, size, erase, touch) {
   const half = Math.floor((size - 1) / 2);
   const off = (size - 1) / 2;
@@ -662,6 +789,7 @@ function stamp(buf, x, y, v, size, erase, touch) {
       }
       const px = x - half + dx;
       if (px < 0 || px >= buf.w) continue;
+      if (state.dither && ((px + py) & 1)) continue;
       setPx(buf, px, py, erase ? 0 : v);
       if (touch) touch(px, py);
     }
@@ -696,6 +824,7 @@ function drawRectShape(buf, x0, y0, x1, y1, v, fill, touch) {
     for (let x = xa; x <= xb; x++) {
       if (x < 0 || x >= buf.w) continue;
       if (!fill && x > xa && x < xb && y > ya && y < yb) continue;
+      if (state.dither && ((x + y) & 1)) continue;
       setPx(buf, x, y, v);
       touch(x, y);
     }
@@ -716,6 +845,7 @@ function drawEllipseShape(buf, x0, y0, x1, y1, v, fill, touch) {
     x = Math.round(x);
     y = Math.round(y);
     if (x < 0 || y < 0 || x >= buf.w || y >= buf.h) return;
+    if (state.dither && ((x + y) & 1)) return;
     setPx(buf, x, y, v);
     touch(x, y);
   };
@@ -739,6 +869,209 @@ function drawEllipseShape(buf, x0, y0, x1, y1, v, fill, touch) {
       const dy = ry * Math.sqrt(t);
       plot(x, cy - dy);
       plot(x, cy + dy);
+    }
+  }
+}
+
+/* ------------------------------------------------- trazos de varios puntos */
+
+/** Separación entre dos puntos, para decidir en cuántos tramos se pinta una curva. */
+const gap = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+/** Pinta una curva de Bézier cúbica (p0 y p3 son los extremos) sellando el pincel. */
+function drawBezier(buf, p0, p1, p2, p3, v, size, touch) {
+  const steps = clamp(Math.round((gap(p0, p1) + gap(p1, p2) + gap(p2, p3)) / 3), 8, 512);
+  let px = p0.x;
+  let py = p0.y;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const mt = 1 - t;
+    const a = mt * mt * mt;
+    const b = 3 * mt * mt * t;
+    const c = 3 * mt * t * t;
+    const d = t * t * t;
+    const x = Math.round(a * p0.x + b * p1.x + c * p2.x + d * p3.x);
+    const y = Math.round(a * p0.y + b * p1.y + c * p2.y + d * p3.y);
+    drawLine(buf, px, py, x, y, v, size, false, touch);
+    px = x;
+    py = y;
+  }
+}
+
+/** Multilínea: un tramo recto entre cada par de puntos consecutivos. */
+function drawPolyline(buf, pts, v, size, touch) {
+  for (let i = 1; i < pts.length; i++) {
+    drawLine(buf, pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, v, size, false, touch);
+  }
+}
+
+/**
+ * Bézier y multicurva: grupos de cuatro puntos, donde cada grupo reaprovecha
+ * el último del anterior, de modo que las curvas quedan encadenadas. Si aún no
+ * hay puntos suficientes, los que faltan se repiten sobre el último: así el
+ * trazo enseña una recta mientras se colocan los controles, en vez de saltar.
+ */
+function drawCurves(buf, pts, v, size, touch, single) {
+  const last = pts[pts.length - 1];
+  for (let i = 0; i + 1 < pts.length; i += 3) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const c = pts[i + 2] || last;
+    const d = pts[i + 3] || last;
+    drawBezier(buf, a, b, c, d, v, size, touch);
+    if (single || i + 3 >= pts.length) break;
+  }
+}
+
+/** Rectángulo que engloba unos puntos, con margen para el grosor del pincel. */
+function ptsBounds(pts, size) {
+  const pad = Math.ceil(size / 2) + 1;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const p of pts) {
+    x0 = Math.min(x0, p.x - pad);
+    y0 = Math.min(y0, p.y - pad);
+    x1 = Math.max(x1, p.x + pad);
+    y1 = Math.max(y1, p.y + pad);
+  }
+  return { x0, y0, x1, y1 };
+}
+
+/* ----------------------------------------------------------------- texto */
+
+const TEXT_FONT = '"Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace';
+
+/**
+ * Dibuja el texto en un lienzo oculto y devuelve solo su máscara: qué píxeles
+ * caen dentro de cada letra. Se guarda la silueta y no el color porque en 8
+ * bits el resultado tiene que ser un índice de paleta plano, sin tonalidades
+ * intermedias de suavizado.
+ */
+function textMask(str, size) {
+  const font = `${size}px ${TEXT_FONT}`;
+  const medir = document.createElement('canvas').getContext('2d');
+  medir.font = font;
+  const w = Math.max(1, Math.ceil(medir.measureText(str).width) + 2);
+  const h = Math.ceil(size * 1.4) + 2;
+  const cv = document.createElement('canvas');
+  cv.width = w;
+  cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.font = font;
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(str, 1, 1);
+  const rgba = ctx.getImageData(0, 0, w, h).data;
+  const mask = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) mask[i] = rgba[i * 4 + 3] >= 128 ? 1 : 0;
+  return { w, h, mask };
+}
+
+/** Estampa una máscara de texto con la esquina superior izquierda en (x, y). */
+function stampMask(buf, mask, x0, y0, v, touch) {
+  for (let y = 0; y < mask.h; y++) {
+    const py = y0 + y;
+    if (py < 0 || py >= buf.h) continue;
+    for (let x = 0; x < mask.w; x++) {
+      if (!mask.mask[y * mask.w + x]) continue;
+      const px = x0 + x;
+      if (px < 0 || px >= buf.w) continue;
+      setPx(buf, px, py, v);
+      if (touch) touch(px, py);
+    }
+  }
+}
+
+/* -------------------------------------------------------------- difuminar */
+
+let blurCache = null;   // sig: paleta de la que salió; map: 5:5:5 -> índice
+
+/**
+ * Índice de paleta más parecido a un color. Se cuantiza la consulta a 5 bits
+ * por canal y se guarda la respuesta: difuminar pide esto para cada píxel, y
+ * un barrido de 256 colores por píxel se notaría en el arrastre.
+ */
+function nearestIndex(r, g, b) {
+  const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+  if (!blurCache || blurCache.sig !== state.palette) {
+    blurCache = { sig: state.palette, map: new Map() };
+  }
+  const hit = blurCache.map.get(key);
+  if (hit !== undefined) return hit;
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < state.palette.length; i++) {
+    const c = state.palette[i];
+    if (!c) continue;
+    if (i === 0 && state.palette.length > 1) continue;  // el 0 es transparencia
+    const dr = to8(c[0]) - r;
+    const dg = to8(c[1]) - g;
+    const db = to8(c[2]) - b;
+    const d = dr * dr + dg * dg + db * db;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  blurCache.map.set(key, best);
+  return best;
+}
+
+/**
+ * Difumina una zona: cada píxel pasa a ser la media de su vecindad de 3×3. Se
+ * promedia en color, no en el valor guardado, porque en 8 bits los índices de
+ * paleta no se pueden mezclar sin más. La transparencia no entra en la media ni
+ * se rellena, de modo que un sprite no se mancha por los bordes.
+ */
+function blurAt(buf, cx, cy, radius, touch) {
+  const r = Math.max(1, radius);
+  const x0 = Math.max(0, cx - r);
+  const y0 = Math.max(0, cy - r);
+  const x1 = Math.min(buf.w - 1, cx + r);
+  const y1 = Math.min(buf.h - 1, cy + r);
+  const w = x1 - x0 + 1;
+  const h = y1 - y0 + 1;
+  if (w <= 0 || h <= 0) return;
+  const depth16 = buf.depth === 16;
+  const src = new Uint16Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) src[y * w + x] = getPx(buf, x0 + x, y0 + y);
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const here = src[y * w + x];
+      if (!here) continue;
+      let sr = 0;
+      let sg = 0;
+      let sb = 0;
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= w) continue;
+          const v = src[yy * w + xx];
+          if (!v) continue;
+          if (depth16) {
+            sr += (((v >> 11) & 31) * 255) / 31;
+            sg += (((v >> 5) & 63) * 255) / 63;
+            sb += ((v & 31) * 255) / 31;
+          } else {
+            const c = state.palette[v];
+            if (!c) continue;
+            sr += to8(c[0]);
+            sg += to8(c[1]);
+            sb += to8(c[2]);
+          }
+          n++;
+        }
+      }
+      if (!n) continue;
+      const nr = sr / n;
+      const ng = sg / n;
+      const nb = sb / n;
+      setPx(buf, x0 + x, y0 + y, depth16 ? encode565(nr, ng, nb) : nearestIndex(nr, ng, nb));
+      if (touch) touch(x0 + x, y0 + y);
     }
   }
 }
@@ -820,45 +1153,30 @@ async function loadPixels() {
   }
   const depth = state.info.depth === 16 ? 16 : 8;
   const bpp = bppOf(depth);
-  const url = `/api/pixels?doc=${state.doc}&id=${m.id}&frame=${state.frame}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`no se han podido leer los píxeles (HTTP ${res.status})`);
-  const raw = new Uint8Array(await res.arrayBuffer());
+  const raw = await Backend.raw('/api/pixels', { doc: state.doc, id: m.id, frame: state.frame });
   const need = Math.max(0, m.width) * Math.max(0, m.height) * bpp;
   const data = new Uint8Array(need);
   data.set(raw.subarray(0, Math.min(need, raw.length)));
   state.buf = { w: m.width, h: m.height, depth, bpp, data };
 }
 
-/** Envía un rectángulo del búfer al servidor. */
+/** Envía un rectángulo del búfer al núcleo de edición. */
 async function sendRect(doc, mapId, frame, r, bytes) {
-  const url = new URL('/api/pixels', location.origin);
-  url.searchParams.set('doc', doc);
-  url.searchParams.set('id', mapId);
-  url.searchParams.set('frame', frame);
-  url.searchParams.set('x', r.x);
-  url.searchParams.set('y', r.y);
-  url.searchParams.set('w', r.w);
-  url.searchParams.set('h', r.h);
-  const res = await fetch(url, { method: 'POST', body: bytes });
-  let j;
-  try {
-    j = await res.json();
-  } catch {
-    throw new Error(`respuesta no válida del servidor (HTTP ${res.status})`);
-  }
-  if (!j.ok) throw new Error(j.error || `error HTTP ${res.status}`);
-  return j;
+  return api(
+    '/api/pixels',
+    { doc, id: mapId, frame, x: r.x, y: r.y, w: r.w, h: r.h },
+    { method: 'POST', body: bytes },
+  );
 }
 
 /** Refresca la miniatura de un mapa tras editarlo. */
-function refreshThumb(doc, mapId) {
+function refreshThumb(mapId) {
   const i = state.maps.findIndex((x) => x.id === mapId);
   if (i < 0) return;
-  state.maps[i].thumb = `/api/image?doc=${doc}&id=${mapId}&t=${Date.now()}`;
+  releaseThumb(state.doc, mapId);
   const li = $('mapList').children[i];
   const img = li && li.querySelector('img');
-  if (img) img.src = state.maps[i].thumb;
+  if (img) fillThumb(img, mapId);
 }
 
 /** Si el mapa afectado sigue a la vista, vuelve a leer sus píxeles. */
@@ -870,7 +1188,7 @@ async function reloadPixelsIfCurrent(doc, mapId, frame) {
     return;
   }
   draw();
-  refreshThumb(doc, mapId);
+  refreshThumb(mapId);
 }
 
 /** Entrada de historial para un cambio de píxeles, con las capas al lado. */
@@ -923,7 +1241,7 @@ async function commitPixels(label, bbox, snapshot, layersBefore, force) {
   state.undoStack.push(pixelEntry(label, doc, mapId, frame, r, before, after, layersBefore, layersSnapshot()));
   state.redoStack = [];
   state.dirty = true;
-  refreshThumb(doc, mapId);
+  refreshThumb(mapId);
   renderToolbar();
 }
 
@@ -981,6 +1299,86 @@ function endDrag(label) {
   if (!d) return;
   composite();
   commitPixels(label, d.bbox, d.comp, d.layerSnap);
+}
+
+/* ------------------------------------------- trazos que piden varios clics */
+
+/**
+ * La multilínea, la bézier y la multicurva no caben en un solo gesto: se van
+ * pidiendo puntos, uno por clic, y el trazo se ve en el aire hasta que se
+ * cierra. Mientras dura, `state.path` guarda los puntos ya fijados y una copia
+ * de la capa de partida, que es lo que permite rehacer la vista previa en cada
+ * movimiento sin que los trazos se vayan acumulando.
+ */
+const PATH_LABELS = { multiline: 'multilínea', bezier: 'bézier', multicurve: 'multicurva' };
+const isPathTool = (t) => t === 'multiline' || t === 'bezier' || t === 'multicurve';
+
+function startPath(p) {
+  state.path = {
+    tool: state.tool,
+    pts: [p],
+    base: activeBuf().data.slice(),
+    comp: state.buf.data.slice(),
+    layerSnap: layersSnapshot(),
+  };
+  previewPath(p);
+  renderPaint();
+}
+
+function addPathPoint(p) {
+  const path = state.path;
+  path.pts.push(p);
+  // La bézier son cuatro puntos y se cierra sola; las otras dos esperan a que
+  // el usuario diga basta.
+  if (path.tool === 'bezier' && path.pts.length >= 4) { finishPath(); return; }
+  previewPath(p);
+}
+
+/** Redibuja el trazo: los puntos fijados y, si hay, el que sigue al cursor. */
+function previewPath(hover) {
+  const path = state.path;
+  const buf = activeBuf();
+  if (!path || !buf) return;
+  const pts = hover ? path.pts.concat([hover]) : path.pts;
+  buf.data.set(path.base);
+  const v = paintValue();
+  if (path.tool === 'multiline') drawPolyline(buf, pts, v, state.brush, null);
+  else drawCurves(buf, pts, v, state.brush, null, path.tool === 'bezier');
+  draw();
+}
+
+/** Fija el trazo en el mapa y lo apunta en el historial. */
+function finishPath() {
+  const path = state.path;
+  if (!path) return;
+  state.path = null;
+  const buf = activeBuf();
+  if (!buf) { renderPaint(); return; }
+  buf.data.set(path.base);
+  // Un solo punto no es un trazo: se descarta sin ensuciar el historial.
+  if (path.pts.length >= 2) {
+    const v = paintValue();
+    if (path.tool === 'multiline') drawPolyline(buf, path.pts, v, state.brush, null);
+    else drawCurves(buf, path.pts, v, state.brush, null, path.tool === 'bezier');
+    composite();
+    draw();
+    commitPixels(PATH_LABELS[path.tool] || 'trazo', ptsBounds(path.pts, state.brush), path.comp, path.layerSnap);
+  } else {
+    composite();
+    draw();
+  }
+  renderPaint();
+}
+
+/** Descarta el trazo en curso sin tocar el mapa. */
+function cancelPath() {
+  const path = state.path;
+  if (!path) return;
+  state.path = null;
+  const buf = activeBuf();
+  if (buf) { buf.data.set(path.base); composite(); }
+  draw();
+  renderPaint();
 }
 
 function updateShapePreview(p) {
@@ -1340,9 +1738,15 @@ function hexTo565(hex) {
   return (((n >> 16) & 255) >> 3) << 11 | (((n >> 8) & 255) >> 2) << 5 | ((n & 255) >> 3);
 }
 
+/** Empaqueta un color de 0..255 por canal en RGB565, como lo guarda el mapa. */
+const encode565 = (r, g, b) => ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+
 /* ----------------------------------------------------- interfaz de pintura */
 
 function setTool(name) {
+  // Cambiar de herramienta con un trazo de varios clics a medias lo fija, en
+  // vez de tirarlo: es lo que menos sorprende a quien va encadenando curvas.
+  if (state.path) finishPath();
   if (state.float && name !== 'select') anchorFloat();
   state.tool = name;
   if (name !== 'select') state.sel = null;
@@ -1360,10 +1764,13 @@ function renderPaint() {
   }
   $('brushSize').disabled = !hasBuf;
   $('fillChk').disabled = !hasBuf;
+  $('ditherChk').disabled = !hasBuf;
   $('brushShape').disabled = !hasBuf;
+  $('btnToWindow').disabled = !hasBuf;
   $('brushSize').value = String(state.brush);
   $('brushShape').value = state.brushShape;
   $('fillChk').checked = state.fillShape;
+  $('ditherChk').checked = state.dither;
   const f16 = hasBuf && buf.depth === 16;
   $('color565Wrap').hidden = !f16;
   if (f16) {
@@ -1380,11 +1787,17 @@ function renderPaint() {
   $('selDel').disabled = !state.sel;
   $('selNone').disabled = !state.sel;
   $('floatActions').hidden = !state.float;
+  $('textActions').hidden = !(hasBuf && state.tool === 'text');
+  $('pathActions').hidden = !state.path;
   renderLayers();
 
   const cv = $('view');
-  cv.classList.toggle('painting', hasBuf && ['pencil', 'brush', 'eraser', 'air', 'fill', 'line', 'rect', 'ellipse'].includes(state.tool));
-  cv.classList.toggle('selecting', hasBuf && state.tool === 'select');
+  const pintan = ['pencil', 'brush', 'eraser', 'air', 'fill', 'blur', 'line', 'rect', 'ellipse'];
+  // Con los puntos de control a la vista, el clic los coloca a ellos: el cursor
+  // de pintar sobra y confundiría.
+  const punteando = hasBuf && !state.pickPoint;
+  cv.classList.toggle('painting', punteando && (pintan.includes(state.tool) || isPathTool(state.tool) || state.tool === 'text'));
+  cv.classList.toggle('selecting', punteando && state.tool === 'select');
 }
 
 function resetPaintState() {
@@ -1392,6 +1805,7 @@ function resetPaintState() {
   state.sel = null;
   state.float = null;
   state.drag = null;
+  state.path = null;
   closeLayers();
 }
 
@@ -1548,10 +1962,38 @@ async function onCanvasDown(ev) {
   const p = canvasPoint(ev);
   if (!p) return;
 
-  // Colocar un punto de control tiene prioridad sobre cualquier herramienta.
+  // Editar los puntos de control tiene prioridad sobre cualquier herramienta.
   if (state.pickPoint && (state.kind === 'fpg' || state.kind === 'map')) {
     const buf = state.buf;
-    if (!buf || p.x < 0 || p.y < 0 || p.x >= buf.w || p.y >= buf.h) return;
+    if (!buf) return;
+    const i = controlPointAt(p);
+    if (i >= 0) {
+      // Hay un punto justo debajo: se agarra y se arrastra, como en el editor
+      // original, en vez de colocar otro encima. Se guarda la lista tal y como
+      // estaba, que es lo que necesita el deshacer después de moverlo.
+      const m = currentMap();
+      state.pointIndex = i;
+      state.drag = {
+        tool: 'point',
+        start: { ...p },
+        last: { ...p },
+        index: i,
+        points0: (m.points || []).map((q) => [q[0], q[1]]),
+      };
+      capturePointer(ev);
+      draw();
+      renderEditor();
+      return;
+    }
+    // Lejos de cualquier punto: el clic coloca el punto activo donde se pulse.
+    if (p.x < 0 || p.y < 0 || p.x >= buf.w || p.y >= buf.h) return;
+    const m = currentMap();
+    if (!m.points || !m.points.length) {
+      // Un sprite recién hecho no tiene punto ninguno que colocar, así que el
+      // primer clic crea el primero en vez de quedarse sin hacer nada.
+      $('ptCount').value = 1;
+      $('ptIndex').value = 0;
+    }
     $('ptX').value = p.x;
     $('ptY').value = p.y;
     await applyPointForm(false);
@@ -1596,6 +2038,29 @@ async function onCanvasDown(ev) {
     return;
   }
 
+  // Los trazos de varios clics no usan gesto: cada pulsación es un punto más.
+  if (isPathTool(tool)) {
+    if (state.path && state.path.tool === tool) {
+      // El doble clic cierra el trazo, como en cualquier editor de dibujo.
+      if (ev.detail >= 2) finishPath();
+      else addPathPoint(p);
+    } else {
+      startPath(p);
+    }
+    return;
+  }
+
+  if (tool === 'text') {
+    const str = state.text.trim();
+    if (!str) { toast('Escribe antes el texto que quieres estampar', true); return; }
+    const mask = textMask(str, state.textSize);
+    beginDrag('text', p);
+    state.drag.bbox = { x0: p.x, y0: p.y, x1: p.x + mask.w - 1, y1: p.y + mask.h - 1 };
+    stampMask(activeBuf(), mask, p.x, p.y, paintValue());
+    endDrag('texto');
+    return;
+  }
+
   beginDrag(tool, p);
   capturePointer(ev);
   if (tool === 'pencil' || tool === 'brush' || tool === 'eraser') {
@@ -1608,6 +2073,9 @@ async function onCanvasDown(ev) {
     spray(activeBuf(), p.x, p.y, paintValue(), touchDrag);
     draw();
     startAir();
+  } else if (tool === 'blur') {
+    blurAt(activeBuf(), p.x, p.y, state.brush, touchDrag);
+    draw();
   } else {
     updateShapePreview(p);
   }
@@ -1616,10 +2084,27 @@ async function onCanvasDown(ev) {
 function onCanvasMove(ev) {
   const p = canvasPoint(ev);
   $('readout').textContent = readout(p);
+  // Con un trazo de varios clics a medias, el cursor estira el último tramo.
+  if (state.path && !state.drag && p) { previewPath(p); return; }
   const d = state.drag;
   const buf = state.buf;
   if (!d || !buf) return;
 
+  if (d.tool === 'point') {
+    // Se mueve el punto en la lista local, que es la que dibuja los mandos;
+    // al soltar se restaura la original y se manda el cambio al núcleo.
+    const m = currentMap();
+    if (m && m.points) {
+      const x = clamp(p.x, 0, buf.w - 1);
+      const y = clamp(p.y, 0, buf.h - 1);
+      m.points[d.index] = [x, y];
+      d.last = { x, y };
+      $('ptX').value = x;
+      $('ptY').value = y;
+      draw();
+    }
+    return;
+  }
   if (d.tool === 'pencil' || d.tool === 'brush' || d.tool === 'eraser') {
     const size = d.tool === 'pencil' ? 1 : state.brush;
     const erase = d.tool === 'eraser';
@@ -1631,6 +2116,12 @@ function onCanvasMove(ev) {
   if (d.tool === 'air') {
     // Solo se mueve el punto de pulverizado: el chorro lo suelta el temporizador.
     d.last = { x: p.x, y: p.y };
+    return;
+  }
+  if (d.tool === 'blur') {
+    blurAt(activeBuf(), p.x, p.y, state.brush, touchDrag);
+    d.last = { x: p.x, y: p.y };
+    draw();
     return;
   }
   if (d.tool === 'line' || d.tool === 'rect' || d.tool === 'ellipse') {
@@ -1658,10 +2149,21 @@ function onCanvasMove(ev) {
   }
 }
 
-function onCanvasUp(ev) {
+async function onCanvasUp(ev) {
   releasePointer(ev);
   const d = state.drag;
   if (!d) return;
+  if (d.tool === 'point') {
+    state.drag = null;
+    const m = currentMap();
+    // El núcleo recibe el antes y el después; el «antes» vuelve a ser la lista
+    // original, que es la que se apuntó al agarrar el punto.
+    if (m && d.points0) m.points = d.points0;
+    draw();
+    renderEditor();
+    if (m) await applyPointsChange(m.points.length, d.index, d.last.x, d.last.y, 'mover punto');
+    return;
+  }
   if (d.tool === 'selectRect') {
     state.sel = clipRect({ x0: d.rect.x, y0: d.rect.y, x1: d.rect.x + d.rect.w - 1, y1: d.rect.y + d.rect.h - 1 }, state.buf);
     state.drag = null;
@@ -1679,7 +2181,7 @@ function onCanvasUp(ev) {
     endDrag('aerógrafo');
     return;
   }
-  const labels = { pencil: 'lápiz', brush: 'pincel', eraser: 'goma', line: 'línea', rect: 'rectángulo', ellipse: 'elipse' };
+  const labels = { pencil: 'lápiz', brush: 'pincel', eraser: 'goma', line: 'línea', rect: 'rectángulo', ellipse: 'elipse', blur: 'difuminado' };
   endDrag(labels[d.tool] || 'trazo');
 }
 
@@ -1848,10 +2350,40 @@ function renderEditor() {
   $('ptHint').textContent = !canPoints
     ? 'Selecciona un mapa para editar sus puntos de control.'
     : state.pickPoint
-      ? 'Haz clic en el lienzo para colocar el punto activo.'
-      : 'Puedes escribir X/Y o activar “Usar clic” para colocarlo sobre el sprite.';
+      ? 'Clic para colocar el punto activo; para moverlo, arrástralo.'
+      : 'Puedes escribir X/Y o activar «Usar clic» (Shift+F2) para situarlo sobre el sprite.';
 
+  renderMapTools(m, canPoints);
   renderPickCursor();
+}
+
+/** Habilita y rellena los controles de crear y transformar mapas.
+    «Nuevo» sirve incluso con un FPG recién creado (que aún no tiene mapas), de
+    ahí que dependa del tipo de documento y no de que haya uno seleccionado. */
+function renderMapTools(m, canPoints) {
+  const esFpg = state.kind === 'fpg';
+
+  $('mapNewBtn').disabled = !esFpg;
+  $('mapDupBtn').disabled = !(esFpg && m);
+  $('mapResizeBtn').disabled = !(canPoints && m);
+  $('mapSplitBtn').disabled = !(esFpg && m);
+  $('mapW').disabled = !canPoints;
+  $('mapH').disabled = !canPoints;
+  $('mapAnchor').disabled = !(canPoints && m);
+  $('muralGroup').hidden = !esFpg;
+  $('muralViewBtn').disabled = !esFpg;
+  $('muralMakeBtn').disabled = !esFpg;
+
+  // El tamaño de partida es el del mapa activo; sin mapa, uno razonable, que es
+  // el que usará «Nuevo» para el primer mapa de un FPG vacío.
+  $('mapW').value = canPoints ? (m ? m.width : 32) : '';
+  $('mapH').value = canPoints ? (m ? m.height : 32) : '';
+
+  $('mapStructHint').textContent = !canPoints
+    ? 'Selecciona un mapa para transformarlo.'
+    : m
+      ? `${m.width}×${m.height}. «Nuevo» y «Trocear» usan el tamaño de arriba.`
+      : 'FPG vacío: «Nuevo» creará el primer mapa con el tamaño de arriba.';
 }
 
 async function applyDocSelection(j, selectId, msg) {
@@ -1969,6 +2501,132 @@ async function moveSelected(dir) {
       await applyDocSelection(j, m.id);
     },
   });
+}
+
+/* ------------------------------------------------- crear y transformar mapas */
+
+/* Estas operaciones cambian la estructura del documento (cuántos mapas hay y de
+   qué tamaño), no los píxeles de un mapa concreto; por eso no entran en el
+   historial de deshacer, que cubre el dibujo —igual que en el editor de DIV—.
+   Eso sí: todo queda en memoria y el fichero de disco no se toca hasta guardar,
+   así que un cambio a peor siempre se puede deshacer volviendo a abrir. */
+
+/** Aplica un cambio estructural y deja seleccionado el mapa resultante. */
+async function mapStructure(path, query, selectId, msg) {
+  try {
+    const j = await api(path, { doc: state.doc, ...query }, { method: 'POST' });
+    const id = selectId !== undefined && selectId !== null ? selectId : j.new_id;
+    await applyDocSelection(j, id, msg);
+    state.dirty = true;
+    renderToolbar();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/** Ancho y alto escritos en el inspector, ya acotados a lo que admite el motor. */
+function mapSizeFields() {
+  return {
+    w: clamp(parseInt($('mapW').value, 10) || 0, 1, 4096),
+    h: clamp(parseInt($('mapH').value, 10) || 0, 1, 4096),
+  };
+}
+
+function mapNew() {
+  if (state.kind !== 'fpg') return;
+  const { w, h } = mapSizeFields();
+  mapStructure('/api/map_add', { w, h }, undefined, `Mapa ${w}×${h} añadido (sin guardar)`);
+}
+
+function mapDuplicate() {
+  const m = currentMap();
+  if (!m || state.kind !== 'fpg') return;
+  mapStructure('/api/map_add', { from: m.id }, undefined, `Mapa ${m.id} duplicado (sin guardar)`);
+}
+
+function mapResize() {
+  const m = currentMap();
+  if (!m) return;
+  const { w, h } = mapSizeFields();
+  if (w === m.width && h === m.height) { toast('Ese ya es el tamaño del mapa'); return; }
+  const recorta = w < m.width || h < m.height;
+  mapStructure('/api/map_resize', { id: m.id, w, h, anchor: $('mapAnchor').value }, m.id,
+    recorta ? `Recortado a ${w}×${h}: lo que sobra se ha perdido` : `Ampliado a ${w}×${h}`);
+}
+
+function mapSplit() {
+  const m = currentMap();
+  if (!m || state.kind !== 'fpg') return;
+  const { w, h } = mapSizeFields();
+  mapStructure('/api/map_split', { id: m.id, w, h }, undefined,
+    `Mapa ${m.id} troceado en baldosas de ${w}×${h} (sin guardar)`);
+}
+
+/** Compone el tapiz y lo enseña; lo monta el núcleo, así que sale igual que el
+    mapa que crearía «Crear mapa del mural». */
+async function muralView() {
+  if (state.kind !== 'fpg') return;
+  releaseMural();
+  try {
+    const url = await Backend.imageUrl('/api/mural', { doc: state.doc });
+    if (!url) throw new Error('no se ha podido componer el mural');
+    muralUrl = url;
+    $('muralImg').src = url;
+    $('muralPreview').classList.add('has-mural');
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function muralMake() {
+  if (state.kind !== 'fpg') return;
+  mapStructure('/api/mural_new', {}, undefined, 'Mural creado como mapa nuevo (sin guardar)');
+}
+
+/**
+ * Copia a una ventana el gráfico que se está viendo, que es lo que hace la tecla
+ * K del editor de DIV. La ventana lleva la imagen a tamaño real para poder
+ * arrastrarla fuera o guardarla; de paso se intenta dejarla en el portapapeles.
+ */
+function copyToWindow() {
+  const m = currentMap();
+  const buf = state.buf;
+  if (!m || !buf) return;
+
+  // La ventana se abre ya, dentro del propio clic. Si se dejara para después de
+  // preparar la imagen, el navegador la tomaría por una ventana emergente
+  // nacida sola y la bloquearía.
+  const w = window.open('', 'fpgplus-grafico', 'width=560,height=480,resizable=yes');
+  if (!w) { toast('El navegador ha bloqueado la ventana emergente', true); return; }
+
+  // La imagen se saca del lienzo fuera de pantalla, que ya lleva la mezcla de
+  // capas al día, en vez de volver a pedírsela al núcleo.
+  renderBuf();
+  const src = state.off.canvas.toDataURL('image/png');
+  const rotulo = `${m.name ? `${m.name} · ` : ''}mapa ${m.id} · ${m.width}×${m.height}`;
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  w.document.open();
+  w.document.write(
+    `<!doctype html><meta charset="utf-8"><title>FPG+ · ${esc(rotulo)}</title>` +
+    '<body style="margin:0;background:#211f1c;color:#cfc9bf;font:12px system-ui">' +
+    `<div style="padding:6px 10px">${esc(rotulo)}</div>` +
+    `<img alt="" style="display:block;image-rendering:pixelated" src="${src}">`,
+  );
+  w.document.close();
+
+  // El portapapeles es un extra: si el navegador lo niega o la ventana nueva se
+  // ha llevado el foco, la ventana ya ha cumplido su parte.
+  window.focus();
+  state.off.canvas.toBlob((blob) => {
+    if (!blob || !navigator.clipboard || !window.ClipboardItem) {
+      toast('Gráfico abierto en una ventana aparte');
+      return;
+    }
+    navigator.clipboard.write([new window.ClipboardItem({ 'image/png': blob })])
+      .then(() => toast('Gráfico abierto en una ventana y copiado al portapapeles'))
+      .catch(() => toast('Gráfico abierto en una ventana aparte'));
+  }, 'image/png');
 }
 
 async function applyPointsChange(nextCount, nextIndex, nextX, nextY, label) {
@@ -2172,12 +2830,18 @@ function exportDialog() {
   if (!state.doc) return;
   const m = state.maps.find((x) => x.id === state.selected);
   const tag = m ? String(m.id).padStart(4, '0') : 'mapa';
+  const suggested = `mapa_${tag}.png`;
+  if (enWeb()) {
+    // El navegador no lista carpetas: el destino lo elige su propio diálogo.
+    elegirDestino(suggested, EXT_IMAGES, 'Exportar mapa', exportTo);
+    return;
+  }
   openDialog({
     mode: 'export',
     title: 'Exportar mapa',
     confirm: 'Exportar',
     exts: EXT_IMAGES,
-    path: `${currentDir()}\\mapa_${tag}.png`,
+    path: `${currentDir()}\\${suggested}`,
     placeholder: 'Fichero de salida (.png .bmp .pcx .jpg)',
     onPick: exportTo,
   });
@@ -2195,6 +2859,14 @@ async function exportTo(out) {
 
 function importDialog() {
   if (!state.doc) return;
+  if (enWeb()) {
+    // Sin diálogo de carpetas no hay dónde preguntar el id; se importa con el
+    // que le toque y, si no cuadra, se cambia luego en el inspector.
+    elegirOrigen(EXT_IMAGES, 'Importar imagen', true).then((name) => {
+      if (name) importFrom(name, '');
+    });
+    return;
+  }
   openDialog({
     mode: 'import',
     title: 'Importar imagen',
@@ -2223,6 +2895,10 @@ async function importFrom(p, idTxt) {
 }
 
 function newFpgDialog() {
+  if (enWeb()) {
+    elegirDestino('NUEVO.FPG', ['.fpg'], 'Nuevo FPG', newFpg);
+    return;
+  }
   openDialog({
     mode: 'new',
     title: 'Nuevo FPG',
@@ -2298,6 +2974,12 @@ function stepSelection(delta) {
 }
 
 function openFileDialog() {
+  if (enWeb()) {
+    elegirOrigen(SUPPORTED, 'Abrir recurso de DIV').then((name) => {
+      if (name) openPath(name);
+    });
+    return;
+  }
   openDialog({
     mode: 'open',
     title: 'Abrir fichero',
@@ -2309,6 +2991,12 @@ function openFileDialog() {
 
 function saveAsDialog() {
   if (!state.doc) return;
+  if (enWeb()) {
+    // Aquí no hay rutas: lo que se guarda con «Guardar» queda en el fichero que
+    // se elija ahora, y a partir de ahí Ctrl+S escribe ahí sin preguntar.
+    elegirDestino(state.info.path, [extOf(state.kind)], 'Guardar como', (p) => saveDoc(p));
+    return;
+  }
   openDialog({
     mode: 'save',
     title: 'Guardar como',
@@ -2326,6 +3014,7 @@ function onKey(ev) {
 
   if (ev.key === 'Escape') {
     if (!$('modal').hidden) { closeDialog(); return; }
+    if (state.path) { cancelPath(); return; }
     if (state.float) { cancelFloat(); return; }
     if (state.sel) { clearSelection(); return; }
     if (state.pickPoint) { state.pickPoint = false; renderEditor(); }
@@ -2350,7 +3039,22 @@ function onKey(ev) {
   if (escribiendo) return;
 
   if (state.buf && $('modal').hidden) {
-    const tools = { v: 'view', p: 'pencil', b: 'brush', e: 'eraser', a: 'air', f: 'fill', i: 'pick', l: 'line', r: 'rect', o: 'ellipse', s: 'select' };
+    // Shift+F2 es la tecla de los puntos de control en el editor de DIV.
+    if (ev.key === 'F2' && ev.shiftKey) {
+      ev.preventDefault();
+      state.pickPoint = !state.pickPoint;
+      renderEditor();
+      return;
+    }
+    if (ev.key.toLowerCase() === 'k') { ev.preventDefault(); copyToWindow(); return; }
+    const tools = {
+      v: 'view', p: 'pencil', b: 'brush', e: 'eraser', a: 'air', f: 'fill', i: 'pick',
+      l: 'line', r: 'rect', o: 'ellipse', s: 'select',
+      // Las teclas de los trazos largos siguen la costumbre de DIV en la medida
+      // de lo posible: la D de difuminar y la T de texto. Las funciones F4, F5 y
+      // F6 que usa el editor original no valen aquí: el navegador se las queda.
+      m: 'multiline', z: 'bezier', c: 'multicurve', t: 'text', d: 'blur',
+    };
     const t = tools[ev.key.toLowerCase()];
     if (t) { setTool(t); return; }
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
@@ -2358,6 +3062,7 @@ function onKey(ev) {
       return;
     }
     if (ev.key === 'Enter') {
+      if (state.path) { ev.preventDefault(); finishPath(); return; }
       if (state.float) { ev.preventDefault(); anchorFloat(); }
       return;
     }
@@ -2393,6 +3098,7 @@ function wire() {
   $('btnExport').onclick = exportDialog;
   $('btnImport').onclick = importDialog;
   $('btnPanel').onclick = toggleInspector;
+  $('btnToWindow').onclick = copyToWindow;
 
   $('tabs').onclick = (e) => {
     const b = e.target.closest('.tab');
@@ -2439,6 +3145,12 @@ function wire() {
   $('mapApply').onclick = applyMapForm;
   $('mapUp').onclick = () => moveSelected('up');
   $('mapDown').onclick = () => moveSelected('down');
+  $('mapNewBtn').onclick = mapNew;
+  $('mapDupBtn').onclick = mapDuplicate;
+  $('mapResizeBtn').onclick = mapResize;
+  $('mapSplitBtn').onclick = mapSplit;
+  $('muralViewBtn').onclick = muralView;
+  $('muralMakeBtn').onclick = muralMake;
   $('ptApply').onclick = () => applyPointForm(false);
   $('ptUndefined').onclick = () => applyPointForm(true);
   $('ptPick').onclick = () => {
@@ -2492,6 +3204,15 @@ function wire() {
   };
   $('brushShape').onchange = () => { state.brushShape = $('brushShape').value; };
   $('fillChk').onchange = () => { state.fillShape = $('fillChk').checked; };
+  $('ditherChk').onchange = () => { state.dither = $('ditherChk').checked; };
+  $('textInput').value = state.text;
+  $('textInput').oninput = () => { state.text = $('textInput').value; };
+  $('textSize').value = String(state.textSize);
+  $('textSize').oninput = () => {
+    state.textSize = clamp(+$('textSize').value || 14, 6, 72);
+  };
+  $('pathOk').onclick = finishPath;
+  $('pathCancel').onclick = cancelPath;
   $('color565').oninput = () => { state.sel565 = hexTo565($('color565').value); };
   $('selCopy').onclick = doCopy;
   $('selCut').onclick = doCut;
@@ -2533,14 +3254,30 @@ function wire() {
 async function boot() {
   wire();
   selectPane(state.pane);
+  renderToolbar();
+  renderPaint();
+
+  // Primero se decide quién va a atender las peticiones: el servidor local, si
+  // está escuchando en esta misma dirección, o el núcleo WebAssembly.
+  try {
+    await Backend.init();
+  } catch (e) {
+    toast('No he podido arrancar el editor: ' + e.message, true);
+    return;
+  }
+
+  if (enWeb()) {
+    // La caja de ruta no sirve para escribir rutas del disco, porque no las hay.
+    document.body.classList.add('mode-web');
+    $('pathInput').placeholder = 'Ningún fichero abierto · «Examinar…» para elegirlo';
+  }
+
   try {
     const st = await api('/api/state');
     state.home = st.home;
   } catch (e) {
-    toast('No he podido hablar con el servidor: ' + e.message, true);
+    toast('No he podido hablar con el núcleo: ' + e.message, true);
   }
-  renderToolbar();
-  renderPaint();
 }
 
 boot();

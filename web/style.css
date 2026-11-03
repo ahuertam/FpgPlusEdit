@@ -55,6 +55,15 @@ body {
 .logo { font-family: var(--mono); font-size: 18px; font-weight: 700; letter-spacing: .06em; color: var(--accent); }
 .brand-sub { font-size: 10.5px; color: var(--ink-soft); letter-spacing: .02em; }
 
+/* En la versión web no hay servidor ni disco que tocar: los ficheros los abre y
+   los guarda el navegador. Conviene que se vea, porque los diálogos son otros. */
+body.mode-web .brand::after {
+  content: "versión web · sin instalación";
+  font-size: 10px;
+  color: var(--ink-soft);
+  letter-spacing: .02em;
+}
+
 .filebox { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 200px; }
 .filebox input {
   flex: 1;
@@ -254,6 +263,16 @@ body.no-inspector .inspector { display: none; }
   color: var(--ink);
 }
 .paintbar .numbox input#rotDeg { width: 58px; }
+.paintbar .numbox input[type=text] {
+  width: 150px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+}
 /* El `display: flex` de arriba gana al `[hidden]` del navegador: sin esta regla,
    el color de 16 bits se vería también al editar mapas de 8 bits. */
 .paintbar .numbox[hidden] { display: none; }
@@ -352,6 +371,20 @@ body.no-inspector .inspector { display: none; }
 .pane.on { display: block; }
 
 .editgroup { display: flex; flex-direction: column; gap: 9px; }
+.editgroup.separated {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.group-title {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
 .editgroup label {
   display: flex;
   align-items: center;
@@ -359,7 +392,8 @@ body.no-inspector .inspector { display: none; }
   font-size: 11.5px;
   color: var(--ink-soft);
 }
-.editgroup input {
+.editgroup input,
+.editgroup select {
   flex: 1;
   min-width: 0;
   font-family: var(--mono);
@@ -370,14 +404,34 @@ body.no-inspector .inspector { display: none; }
   background: #fff;
   color: var(--ink);
 }
-.editgroup input:focus { outline: 2px solid var(--sel); border-color: var(--accent); }
+.editgroup select { font-family: var(--sans); }
+.editgroup input:focus,
+.editgroup select:focus { outline: 2px solid var(--sel); border-color: var(--accent); }
 
 .edit-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 .point-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.point-grid.duo { grid-template-columns: repeat(2, 1fr); }
 .point-grid label { flex-direction: column; align-items: stretch; gap: 4px; }
 
 .hint { margin: 0; font-size: 11px; color: var(--ink-soft); }
+
+/* Vista previa del mural: un tablero con transparencia de fondo, para que se
+   vea dónde acaba cada mapa aunque el fondo sea índice 0. */
+.mural-preview {
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: repeating-conic-gradient(#ececec 0% 25%, #fff 0% 50%) 50% / 12px 12px;
+}
+.mural-preview img { display: none; max-width: 100%; image-rendering: pixelated; }
+.mural-preview.has-mural img { display: block; }
+.mural-preview.has-mural .mural-empty { display: none; }
+.mural-empty { padding: 18px 8px; font-size: 11px; color: var(--ink-soft); }
 
 .props {
   margin: 0;
