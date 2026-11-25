@@ -49,9 +49,13 @@ const Backend = (() => {
   let mode = null;   // 'local' | 'web'
   let wasm = null;   // exports del módulo WebAssembly
   let ready = null;  // promesa de init(), para no repetir la detección
+  let webLane = Promise.resolve(); // cola de llamadas al núcleo WASM
+  let webSeq = 1;    // id lógico de cada fichero abierto/guardado en la web
 
   /** Sumideros de escritura por nombre lógico: a dónde va lo que guarda el núcleo. */
   const sinks = new Map();
+  /** Nombre visible por ruta lógica: evita colisiones entre ficheros con igual nombre. */
+  const displayNames = new Map();
 
   // --------------------------------------------------------------- consultas
 
@@ -66,6 +70,28 @@ const Backend = (() => {
   function urlOf(path, params) {
     const q = queryOf(params).toString();
     return new URL(`${path}${q ? `?${q}` : ''}`, location.origin).toString();
+  }
+
+  const baseName = (p) => String(p || '').split(/[\\/]/).pop() || 'sin_titulo';
+  const isLogicalPath = (p) => String(p || '').startsWith('__web__/');
+
+  /** Ruta lógica interna para el núcleo WASM.
+   *
+   * El nombre visible se conserva al final para que `base_name()` siga sacando
+   * algo útil, pero el prefijo único evita que dos `SPRITE.MAP` distintos se
+   * pisen entre sí dentro de la sesión web.
+   */
+  function makeLogicalPath(display) {
+    return `__web__/${webSeq++}/${baseName(display)}`;
+  }
+
+  function rememberDisplay(logical, display) {
+    displayNames.set(logical, baseName(display));
+    return logical;
+  }
+
+  function shownPath(path) {
+    return isLogicalPath(path) ? (displayNames.get(path) || baseName(path)) : path;
   }
 
   // ------------------------------------------------------- versión local: HTTP
@@ -113,48 +139,74 @@ const Backend = (() => {
     return out;
   }
 
-  /** Ejecuta una petición contra el núcleo y devuelve la respuesta en crudo. */
-  async function webCall(path, params, opts) {
-    const method = ((opts && opts.method) || 'GET').toUpperCase();
-    const body = opts && opts.body
-      ? (opts.body instanceof Uint8Array ? opts.body : new Uint8Array(opts.body))
-      : new Uint8Array(0);
-
-    const m = enc(method);
-    const op = enc(path.replace(/^\/api\//, ''));
-    const q = enc(queryOf(params).toString());
-    const md = pass(m);
-    const od = pass(op);
-    const qd = pass(q);
-    const bd = pass(body);
-
-    const rc = wasm.call(md.p, md.n, od.p, od.n, qd.p, qd.n, bd.p, bd.n);
-    free(md); free(od); free(qd); free(bd);
-    if (!rc) throw new Error('el núcleo ha rechazado la petición');
-
-    const status = wasm.resp_status();
-    const ctypeLen = wasm.resp_ctype_len();
-    const ctype = ctypeLen ? dec(pull((p, c) => wasm.resp_ctype(p, c), ctypeLen)) : '';
-    const bodyLen = wasm.resp_body_len();
-    const data = bodyLen ? pull((p, c) => wasm.resp_body(p, c), bodyLen) : new Uint8Array(0);
-
-    // Lo que el núcleo haya escrito (un guardado, una exportación) sale de aquí.
-    await drainOutputs();
-
-    return { status, ctype, bytes: data };
+  /** Como el núcleo WebAssembly es único y comparte búferes de respuesta,
+      todas las llamadas web pasan por una cola. Así no se pisan una miniatura,
+      la lectura de píxeles y el cierre de otro documento. */
+  function serialWeb(fn) {
+    const run = webLane.then(fn, fn);
+    webLane = run.catch(() => {});
+    return run;
   }
 
-  /** Recoge los ficheros que el núcleo ha escrito y los lleva a su destino. */
-  async function drainOutputs() {
+  /** Ejecuta una petición contra el núcleo y devuelve la respuesta en crudo. */
+  async function webCall(path, params, opts) {
+    const r = await serialWeb(async () => {
+      const method = ((opts && opts.method) || 'GET').toUpperCase();
+      const body = opts && opts.body
+        ? (opts.body instanceof Uint8Array ? opts.body : new Uint8Array(opts.body))
+        : new Uint8Array(0);
+
+      const m = enc(method);
+      const op = enc(path.replace(/^\/api\//, ''));
+      const q = enc(queryOf(params).toString());
+      const md = pass(m);
+      const od = pass(op);
+      const qd = pass(q);
+      const bd = pass(body);
+
+      const rc = wasm.call(md.p, md.n, od.p, od.n, qd.p, qd.n, bd.p, bd.n);
+      free(md); free(od); free(qd); free(bd);
+      if (!rc) throw new Error('el núcleo ha rechazado la petición');
+
+      const status = wasm.resp_status();
+      const ctypeLen = wasm.resp_ctype_len();
+      const ctype = ctypeLen ? dec(pull((p, c) => wasm.resp_ctype(p, c), ctypeLen)) : '';
+      const bodyLen = wasm.resp_body_len();
+      const data = bodyLen ? pull((p, c) => wasm.resp_body(p, c), bodyLen) : new Uint8Array(0);
+
+      // Lo que el núcleo haya escrito (un guardado, una exportación) se copia
+      // aquí, aún dentro de la cola: los bytes viven en su búfer compartido.
+      const out = collectOutputs();
+
+      return { status, ctype, bytes: data, out };
+    });
+
+    // La entrega va fuera de la cola: escribir en disco (o pedir permisos) no
+    // debe congelar la edición mientras el núcleo queda libre para el siguiente
+    // trazo.
+    if (r.out.length) await deliverAll(r.out);
+
+    return { status: r.status, ctype: r.ctype, bytes: r.bytes };
+  }
+
+  /** Recoge y vacía lo que el núcleo ha escrito. Devuelve `{name, data}`. */
+  function collectOutputs() {
     const n = wasm.out_count();
+    const out = [];
     for (let i = 0; i < n; i++) {
       const pl = wasm.out_path_len(i);
       const name = pl ? dec(pull((p, c) => wasm.out_path(i, p, c), pl)) : '';
       const dl = wasm.out_data_len(i);
       const data = dl ? pull((p, c) => wasm.out_data(i, p, c), dl) : new Uint8Array(0);
-      await deliver(name, data);
+      out.push({ name, data });
     }
-    wasm.clear_outputs();
+    if (n) wasm.clear_outputs();
+    return out;
+  }
+
+  /** Lleva a su destino cada salida recogida. */
+  async function deliverAll(out) {
+    for (const o of out) await deliver(o.name, o.data);
   }
 
   async function deliver(name, data) {
@@ -164,7 +216,7 @@ const Backend = (() => {
       await sink(blob);
       return;
     }
-    download(name, blob);
+    download(shownPath(name), blob);
   }
 
   /** Descarga de reserva: cuando no hay ningún sumidero para ese nombre. */
@@ -188,6 +240,10 @@ const Backend = (() => {
       throw new Error(`respuesta no válida del núcleo (HTTP ${r.status})`);
     }
     if (!j.ok) throw new Error(j.error || `error del núcleo (HTTP ${r.status})`);
+    if (j && typeof j.path === 'string') {
+      j.path = shownPath(j.path);
+      if (typeof j.name === 'string' && j.name === '') j.name = baseName(j.path);
+    }
     return j;
   }
 
@@ -203,9 +259,10 @@ const Backend = (() => {
   }
 
   /** Deja unos bytes a la vista del núcleo, como si estuvieran en el disco. */
-  function stage(name, bytes) {
+  function stage(name, bytes, display) {
     if (mode !== 'web') return;
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (display) rememberDisplay(name, display);
     const d = pass(data);
     const nm = pass(enc(name));
     wasm.put_input(nm.p, nm.n, d.p, d.n);
@@ -271,10 +328,11 @@ const Backend = (() => {
         });
         const file = await handle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
-        stage(file.name, bytes);
+        const logical = makeLogicalPath(file.name);
+        stage(logical, bytes, file.name);
         // Se recuerda el fichero para que Ctrl+S escriba ahí sin preguntar.
-        if (!cfg.readOnly) sinks.set(file.name, fileSink(handle));
-        return file.name;
+        if (!cfg.readOnly) sinks.set(logical, fileSink(handle));
+        return logical;
       } catch (e) {
         if (e && e.name === 'AbortError') return null;
         throw e;
@@ -285,8 +343,9 @@ const Backend = (() => {
     const file = await inputFile(exts);
     if (!file) return null;
     const bytes = new Uint8Array(await file.arrayBuffer());
-    stage(file.name, bytes);
-    return file.name;
+    const logical = makeLogicalPath(file.name);
+    stage(logical, bytes, file.name);
+    return logical;
   }
 
   /** Selector de guardado del navegador. Devuelve el nombre, con destino listo. */
@@ -300,16 +359,18 @@ const Backend = (() => {
           types: typesOf(exts, cfg.title),
         });
         const chosen = handle.name || name;
-        sinks.set(chosen, fileSink(handle));
-        return chosen;
+        const logical = rememberDisplay(makeLogicalPath(chosen), chosen);
+        sinks.set(logical, fileSink(handle));
+        return logical;
       } catch (e) {
         if (e && e.name === 'AbortError') return null;
         throw e;
       }
     }
     // Sin FS Access API no hay fichero que recordar: al guardar se descargará.
-    sinks.set(name, (blob) => download(name, blob));
-    return name;
+    const logical = rememberDisplay(makeLogicalPath(name), name);
+    sinks.set(logical, (blob) => download(shownPath(logical), blob));
+    return logical;
   }
 
   function inputFile(exts) {

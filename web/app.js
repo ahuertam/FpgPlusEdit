@@ -37,6 +37,7 @@ const state = {
   undoStack: [],
   redoStack: [],
   historyBusy: false,
+  pendingEdit: null,  // última edición en curso, para esperarla antes de cambiar de documento
 
   // Editor de pintura
   tool: 'view',       // herramienta activa
@@ -258,7 +259,17 @@ function currentDir() {
 
 /* --------------------------------------------------------------- apertura */
 
+/** Espera a que cuaje la última edición lanzada, si aún está en el aire. */
+async function waitEdits() {
+  while (state.pendingEdit) {
+    const p = state.pendingEdit;
+    state.pendingEdit = null;
+    await p;
+  }
+}
+
 async function openPath(p) {
+  await waitEdits();
   try {
     const j = await api('/api/open', { path: p });
     applyDoc(j, { reset: true });
@@ -289,6 +300,7 @@ async function dropFile(file) {
   }
   try {
     const buf = await file.arrayBuffer();
+    await waitEdits();
     const j = await api('/api/drop', { name: file.name }, { method: 'POST', body: buf });
     if (!$('modal').hidden) closeDialog();
     applyDoc(j, { reset: true });
@@ -321,6 +333,11 @@ function applyDoc(j, opts) {
     state.undoStack = [];
     state.redoStack = [];
     state.pickPoint = false;
+    // Un documento nuevo arranca siempre desde su primer mapa y su primer
+    // fotograma. Si aquí quedase el fotograma del recurso anterior, al crear un
+    // MAP nuevo podría intentarse cargar un índice que ya no existe.
+    state.selected = null;
+    state.frame = 0;
     state.dirty = false;
   }
 
@@ -1343,9 +1360,19 @@ function floodFill(buf, x, y, v, touch) {
       setPx(buf, i, py, v);
       touch(i, py);
     }
-    for (let i = lx; i <= rx; i++) {
-      if (py - 1 >= 0 && getPx(buf, i, py - 1) === target) stack.push([i, py - 1]);
-      if (py + 1 < buf.h && getPx(buf, i, py + 1) === target) stack.push([i, py + 1]);
+    // De cada fila vecina solo se apila el primer píxel de cada tramo. Si se
+    // apilara cada columna, una zona grande y lisa llenaría la pila con miles
+    // de entradas repetidas y el relleno acabaría atascando la interfaz.
+    for (const ny of [py - 1, py + 1]) {
+      if (ny < 0 || ny >= buf.h) continue;
+      let run = false;
+      for (let i = lx; i <= rx; i++) {
+        if (getPx(buf, i, ny) === target) {
+          if (!run) { stack.push([i, ny]); run = true; }
+        } else {
+          run = false;
+        }
+      }
     }
   }
 }
@@ -1457,8 +1484,18 @@ function pixelEntry(label, doc, mapId, frame, rect, before, after, layersBefore,
  * Valida el cambio, lo envía al servidor y lo apunta en el historial.
  * `snapshot` es la mezcla anterior (lo que veía el usuario); `layersBefore` y
  * `force` solo entran en juego cuando se trabaja por capas.
+ *
+ * Se apunta la promesa en `state.pendingEdit`: abrir o crear un fichero la
+ * espera antes de cambiar de documento, para no cruzarse con un commit a medio
+ * camino (el gesto del ratón no espera a que el núcleo confirme).
  */
-async function commitPixels(label, bbox, snapshot, layersBefore, force) {
+function commitPixels(label, bbox, snapshot, layersBefore, force) {
+  const p = runCommitPixels(label, bbox, snapshot, layersBefore, force);
+  state.pendingEdit = p.then(() => {}, () => {});
+  return p;
+}
+
+async function runCommitPixels(label, bbox, snapshot, layersBefore, force) {
   const buf = state.buf;
   if (!buf || state.historyBusy) return;
   const doc = state.doc;
@@ -1547,7 +1584,8 @@ function endDrag(label) {
   state.drag = null;
   if (!d) return;
   composite();
-  commitPixels(label, d.bbox, d.comp, d.layerSnap);
+  draw();
+  return commitPixels(label, d.bbox, d.comp, d.layerSnap);
 }
 
 /* ------------------------------------------- trazos que piden varios clics */
@@ -2284,7 +2322,7 @@ async function onCanvasDown(ev) {
   if (tool === 'fill') {
     beginDrag('fill', p);
     floodFill(activeBuf(), p.x, p.y, paintValue(), touchDrag);
-    endDrag('relleno');
+    await endDrag('relleno');
     return;
   }
 
@@ -2307,7 +2345,7 @@ async function onCanvasDown(ev) {
     beginDrag('text', p);
     state.drag.bbox = { x0: p.x, y0: p.y, x1: p.x + mask.w - 1, y1: p.y + mask.h - 1 };
     stampMask(activeBuf(), mask, p.x, p.y, paintValue());
-    endDrag('texto');
+    await endDrag('texto');
     return;
   }
 
@@ -2428,11 +2466,11 @@ async function onCanvasUp(ev) {
   }
   if (d.tool === 'air') {
     stopAir();
-    endDrag('aerógrafo');
+    await endDrag('aerógrafo');
     return;
   }
   const labels = { pencil: 'lápiz', brush: 'pincel', eraser: 'goma', line: 'línea', rect: 'rectángulo', ellipse: 'elipse', blur: 'difuminado' };
-  endDrag(labels[d.tool] || 'trazo');
+  await endDrag(labels[d.tool] || 'trazo');
 }
 
 function capturePointer(ev) {
@@ -3005,6 +3043,10 @@ function renderToolbar() {
 
   const m = state.maps.find((x) => x.id === state.selected);
   const frames = m ? m.frames || 1 : 1;
+  // El selector visual ya se limitaba al rango válido, pero el estado interno
+  // podía conservar un fotograma antiguo hasta la próxima interacción. Se deja
+  // clamped aquí antes de que `loadCanvas()` lo use.
+  state.frame = clamp(state.frame, 0, Math.max(0, frames - 1));
   const sel = $('frameSel');
   if (sel.options.length !== frames) {
     sel.innerHTML = '';
@@ -3016,7 +3058,7 @@ function renderToolbar() {
     }
   }
   sel.disabled = frames <= 1;
-  sel.value = String(Math.min(state.frame, frames - 1));
+  sel.value = String(state.frame);
 
   renderStatus();
 }
@@ -3144,24 +3186,81 @@ async function importFrom(p, idTxt) {
   }
 }
 
-function newFpgDialog() {
+/* Qué se puede crear, con su extensión, si pide medidas y si admite nombre.
+   Las pistas son las que se enseñan al lado de la elección de tipo. */
+const NEW_KINDS = {
+  fpg: { ext: '.fpg', file: 'NUEVO.FPG', label: 'FPG', size: true, mapName: false,
+    hint: 'Un FPG es la caja de gráficos de DIV. Nace con un primer mapa del tamaño indicado.' },
+  f16: { ext: '.f16', file: 'NUEVO.F16', label: 'FPG de 16 bits', size: true, mapName: false,
+    hint: 'Como el FPG normal, pero en color directo (sin paleta). Nace con un mapa del tamaño indicado.' },
+  map: { ext: '.map', file: 'NUEVO.MAP', label: 'MAP', size: true, mapName: true,
+    hint: 'Un gráfico suelto, el que carga load_map. Se crea en blanco con estas medidas.' },
+  m16: { ext: '.m16', file: 'NUEVO.M16', label: 'MAP de 16 bits', size: true, mapName: true,
+    hint: 'Un gráfico suelto en color directo. Se crea en blanco con estas medidas.' },
+  pal: { ext: '.pal', file: 'NUEVA.PAL', label: 'PAL', size: false, mapName: false,
+    hint: 'Una paleta de 256 colores, vacía, para colorear en el dock de abajo.' },
+  fnt: { ext: '.fnt', file: 'NUEVA.FNT', label: 'FNT', size: false, mapName: false,
+    hint: 'Una fuente de 256 caracteres, todavía sin dibujar.' },
+};
+
+/** Tipo marcado en el diálogo de creación. */
+const newKind = () => (document.querySelector('input[name="newKind"]:checked') || {}).value || 'fpg';
+
+/** Abre el diálogo de creación, siempre con el FPG como opción de partida. */
+function newDialog() {
+  for (const r of document.querySelectorAll('input[name="newKind"]')) r.checked = r.value === 'fpg';
+  $('newName').value = '';
+  $('newModal').hidden = false;
+  newKindChanged();
+}
+
+/** Ajusta el diálogo al tipo elegido: unos piden medidas y otros no. */
+function newKindChanged() {
+  const k = NEW_KINDS[newKind()];
+  $('newSizeWrap').hidden = !k.size;
+  $('newNameWrap').hidden = !k.mapName;
+  $('newSizeHint').textContent = k.hint;
+}
+
+function closeNewDialog() {
+  $('newModal').hidden = true;
+}
+
+/** Recoge lo elegido y pide el destino: primero se sabe el qué, luego el dónde. */
+function newConfirm() {
+  const kind = newKind();
+  const k = NEW_KINDS[kind];
+  const opts = { kind };
+  if (k.size) {
+    opts.w = clamp(parseInt($('newW').value, 10) || 64, 1, 4096);
+    opts.h = clamp(parseInt($('newH').value, 10) || 64, 1, 4096);
+  }
+  if (k.mapName) opts.name = $('newName').value.trim() || null;
+  closeNewDialog();
+
   if (enWeb()) {
-    elegirDestino('NUEVO.FPG', ['.fpg'], 'Nuevo FPG', newFpg);
+    elegirDestino(k.file, [k.ext], `Nuevo ${k.label}`, (p) => createFile(p, opts));
     return;
   }
   openDialog({
     mode: 'new',
-    title: 'Nuevo FPG',
+    title: `Nuevo ${k.label}`,
     confirm: 'Crear',
-    exts: ['.fpg'],
-    path: `${state.dir || state.home}\\NUEVO.FPG`,
-    onPick: newFpg,
+    exts: [k.ext],
+    path: `${state.dir || state.home}\\${k.file}`,
+    onPick: (p) => createFile(p, opts),
   });
 }
 
-async function newFpg(p) {
+/** Crea el fichero en el destino elegido con lo que se decidió en el diálogo. */
+async function createFile(p, opts) {
+  const params = { path: p, kind: opts.kind };
+  if (opts.w) params.w = opts.w;
+  if (opts.h) params.h = opts.h;
+  if (opts.name) params.name = opts.name;
   try {
-    const j = await api('/api/new', { path: p }, { method: 'POST' });
+    await waitEdits();
+    const j = await api('/api/new', params, { method: 'POST' });
     applyDoc(j, { reset: true });
     $('pathInput').value = j.path;
     toast(`Creado ${j.name}`);
@@ -3169,6 +3268,12 @@ async function newFpg(p) {
     toast(e.message, true);
   }
 }
+
+/* ------------------------------------------------------------- la ayuda */
+
+function openHelp() { $('helpModal').hidden = false; }
+function closeHelp() { $('helpModal').hidden = true; }
+function toggleHelp() { $('helpModal').hidden ? openHelp() : closeHelp(); }
 
 /* --------------------------------------------------------------- arranque */
 
@@ -3264,6 +3369,8 @@ function onKey(ev) {
 
   if (ev.key === 'Escape') {
     if (!$('modal').hidden) { closeDialog(); return; }
+    if (!$('newModal').hidden) { closeNewDialog(); return; }
+    if (!$('helpModal').hidden) { closeHelp(); return; }
     if (state.path) { cancelPath(); return; }
     if (state.float) { cancelFloat(); return; }
     if (state.sel) { clearSelection(); return; }
@@ -3271,11 +3378,14 @@ function onKey(ev) {
     return;
   }
 
+  // La ayuda es lo primero que se ofrece en un editor: siempre a mano con F1.
+  if (ev.key === 'F1') { ev.preventDefault(); toggleHelp(); return; }
+
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
     const k = ev.key.toLowerCase();
     if (k === 's') { ev.preventDefault(); ev.shiftKey ? saveAsDialog() : saveDoc(null); return; }
     if (k === 'o') { ev.preventDefault(); openFileDialog(); return; }
-    if (k === 'n') { ev.preventDefault(); newFpgDialog(); return; }
+    if (k === 'n') { ev.preventDefault(); newDialog(); return; }
     if (k === 'z') { ev.preventDefault(); ev.shiftKey ? redoAction() : undoAction(); return; }
     if (k === 'y') { ev.preventDefault(); redoAction(); return; }
     if (!escribiendo && k === 'c') { if (state.sel) { ev.preventDefault(); doCopy(); } return; }
@@ -3335,16 +3445,24 @@ function onKey(ev) {
 
 function wire() {
   $('btnOpen').onclick = () => {
+    if (enWeb()) {
+      openFileDialog();
+      return;
+    }
     const p = $('pathInput').value.trim();
     if (p) openPath(p);
     else openFileDialog();
   };
   $('pathInput').onkeydown = (e) => {
-    if (e.key === 'Enter') $('btnOpen').click();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('btnOpen').click();
+    }
   };
 
   $('btnBrowse').onclick = openFileDialog;
-  $('btnNew').onclick = newFpgDialog;
+  $('btnNew').onclick = newDialog;
+  $('btnHelp').onclick = toggleHelp;
   $('btnSave').onclick = () => saveDoc(null);
   $('btnSaveAs').onclick = saveAsDialog;
   $('btnUndo').onclick = undoAction;
@@ -3381,6 +3499,23 @@ function wire() {
   $('modal').onclick = (e) => {
     if (e.target === $('modal')) closeDialog();
   };
+
+  // Diálogo de creación: tipo, medidas y nombre.
+  $('newClose').onclick = closeNewDialog;
+  $('newCancel').onclick = closeNewDialog;
+  $('newOk').onclick = newConfirm;
+  $('newModal').onclick = (e) => {
+    if (e.target === $('newModal')) closeNewDialog();
+  };
+  for (const r of document.querySelectorAll('input[name="newKind"]')) r.onchange = newKindChanged;
+
+  // Guía de ayuda.
+  $('helpClose').onclick = closeHelp;
+  $('helpOk').onclick = closeHelp;
+  $('helpModal').onclick = (e) => {
+    if (e.target === $('helpModal')) closeHelp();
+  };
+
   document.onkeydown = onKey;
 
   // Arrastrar un recurso desde el explorador y soltarlo en cualquier punto de
@@ -3537,7 +3672,10 @@ async function boot() {
   if (enWeb()) {
     // La caja de ruta no sirve para escribir rutas del disco, porque no las hay.
     document.body.classList.add('mode-web');
+    $('pathInput').readOnly = true;
     $('pathInput').placeholder = 'Ningún fichero abierto · «Examinar…» para elegirlo';
+    $('pathInput').title = 'En la versión web, «Abrir» y «Examinar…» usan el selector del navegador';
+    $('pathInput').onclick = openFileDialog;
   }
 
   try {

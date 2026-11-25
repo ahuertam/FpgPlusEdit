@@ -249,11 +249,13 @@ fn dims(req: &Request) -> Result<(i32, i32), Resp> {
     Ok((w, h))
 }
 
-/// Crea un fichero en blanco: un FPG, un MAP suelto o una PAL.
+/// Crea un fichero en blanco: un FPG, un MAP suelto, una PAL o un FNT.
 ///
-/// `kind` decide qué se crea (`fpg` por defecto, `f16`, `map`, `m16`, `pal`).
-/// Para MAP y FPG hacen falta el ancho y el alto; la paleta es opcional y, si
-/// no se indica, se usa una vacía (o la que traiga el propio MAP de 8 bits).
+/// `kind` decide qué se crea (`fpg` por defecto, `f16`, `map`, `m16`, `pal`,
+/// `fnt`). Para MAP hacen falta el ancho y el alto; para FPG son opcionales,
+/// pero si vienen el FPG nace con un primer mapa de ese tamaño, que es lo
+/// cómodo para empezar a pintar. La paleta es opcional y, si no se indica, se
+/// usa una vacía (o la que traiga el propio MAP de 8 bits).
 fn new_file(req: &Request, store: &mut Store, fs: &mut dyn Fs) -> Resp {
     let path = match req.q("path") {
         Some(p) => p.to_string(),
@@ -268,8 +270,14 @@ fn new_file(req: &Request, store: &mut Store, fs: &mut dyn Fs) -> Resp {
     let mut doc = match kind.as_str() {
         "fpg" | "f16" => {
             let depth = if kind == "f16" { 16 } else { 8 };
+            let mut fpg = Fpg::new(depth, pal);
+            // Con medidas, el FPG arranca con un mapa en blanco: así «Nuevo FPG»
+            // deja un lienzo listo para pintar en vez de una lista vacía.
+            if let Ok((w, h)) = dims(req) {
+                fpg.maps.push(FpgMap::new(1, w, h, depth));
+            }
             Doc::Fpg {
-                fpg: Fpg::new(depth, pal),
+                fpg,
                 path: path.clone(),
                 size: 0,
                 gzip: false,
@@ -300,6 +308,12 @@ fn new_file(req: &Request, store: &mut Store, fs: &mut dyn Fs) -> Resp {
         }
         "pal" => Doc::Pal {
             pal: pal.unwrap_or_else(Palette::new),
+            path: path.clone(),
+            size: 0,
+            gzip: false,
+        },
+        "fnt" => Doc::Fnt {
+            fnt: Fnt::new(pal.unwrap_or_else(Palette::new)),
             path: path.clone(),
             size: 0,
             gzip: false,

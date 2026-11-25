@@ -14,6 +14,8 @@
     <span class="brand-sub">editor de recursos de DIV&nbsp;Games&nbsp;Studio&nbsp;2</span>
   </div>
 
+  <button id="btnHelp" class="btn ghost help-btn" title="Ayuda y primeros pasos (F1)">? Ayuda</button>
+
   <div class="filebox">
     <input id="pathInput" type="text" spellcheck="false" placeholder="Ruta del fichero (.FPG .MAP .PAL .FNT)">
     <button id="btnOpen" class="btn">Abrir</button>
@@ -298,6 +300,164 @@
         <input id="mExtra" type="text" spellcheck="false">
       </label>
       <button id="mOk" class="btn">Abrir</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Diálogo de creación: elige qué recurso se crea y con qué medidas -->
+<div class="modal" id="newModal" hidden>
+  <div class="modal-box pick-box">
+    <header>
+      <h3>Nuevo recurso</h3>
+      <button id="newClose" class="mini" title="Cancelar (Esc)">✕</button>
+    </header>
+    <div class="pick-body">
+      <fieldset class="pick-kinds">
+        <legend>Tipo de recurso</legend>
+        <label class="pick">
+          <input type="radio" name="newKind" value="fpg" checked>
+          <span class="pick-name">FPG · 8 bits</span>
+          <span class="pick-note">Caja de gráficos y mapas con su paleta</span>
+        </label>
+        <label class="pick">
+          <input type="radio" name="newKind" value="f16">
+          <span class="pick-name">FPG · 16 bits</span>
+          <span class="pick-note">Color directo, sin paleta</span>
+        </label>
+        <label class="pick">
+          <input type="radio" name="newKind" value="map">
+          <span class="pick-name">MAP · 8 bits</span>
+          <span class="pick-note">Un solo gráfico suelto, con paleta</span>
+        </label>
+        <label class="pick">
+          <input type="radio" name="newKind" value="m16">
+          <span class="pick-name">MAP · 16 bits</span>
+          <span class="pick-note">Un solo gráfico suelto en color directo</span>
+        </label>
+        <label class="pick">
+          <input type="radio" name="newKind" value="pal">
+          <span class="pick-name">PAL</span>
+          <span class="pick-note">Paleta de 256 colores</span>
+        </label>
+        <label class="pick">
+          <input type="radio" name="newKind" value="fnt">
+          <span class="pick-name">FNT</span>
+          <span class="pick-note">Fuente de 256 caracteres</span>
+        </label>
+      </fieldset>
+      <div class="pick-side">
+        <div class="pick-size" id="newSizeWrap">
+          <label>Ancho <input id="newW" type="number" min="1" max="4096" value="64"></label>
+          <label>Alto <input id="newH" type="number" min="1" max="4096" value="64"></label>
+        </div>
+        <label class="pick-name-field" id="newNameWrap" hidden>Nombre del mapa
+          <input id="newName" type="text" spellcheck="false" placeholder="Mapa nuevo">
+        </label>
+        <p class="hint" id="newSizeHint"></p>
+      </div>
+    </div>
+    <footer>
+      <span class="hint">Elige el destino en el paso siguiente.</span>
+      <span class="spacer"></span>
+      <button id="newCancel" class="btn ghost">Cancelar</button>
+      <button id="newOk" class="btn">Elegir destino…</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Guía de primeros pasos y atajos (botón «? Ayuda» o F1) -->
+<div class="modal" id="helpModal" hidden>
+  <div class="modal-box help-box">
+    <header>
+      <h3>Ayuda y primeros pasos</h3>
+      <button id="helpClose" class="mini" title="Cerrar (Esc)">✕</button>
+    </header>
+    <div class="help-body">
+
+      <section>
+        <h4>Qué es esto</h4>
+        <p>FPG+ Edit es el taller gráfico del libro: abre los recursos de DIV Games
+        Studio 2 —<b>FPG</b>, <b>MAP</b>, <b>PAL</b> y <b>FNT</b>—, deja retocarlos y los
+        vuelve a escribir tal y como los espera el motor, byte a byte.</p>
+      </section>
+
+      <section>
+        <h4>Los tres primeros minutos</h4>
+        <ol class="steps">
+          <li><b>Abre</b> un recurso con «Abrir» o <b>crea</b> uno con «Nuevo…»
+          (Ctrl+N). En el diálogo de creación eliges el tipo —FPG, MAP, PAL o FNT— y,
+          si toca, las medidas.</li>
+          <li><b>Pinta</b> en el lienzo con las herramientas de la barra superior. El
+          color se toma de la paleta del dock de abajo; en los recursos de 16 bits se
+          elige con el selector de color.</li>
+          <li><b>Guarda</b> con Ctrl+S. «Guardar como…» (Ctrl+Shift+S) deja una copia en
+          otra ruta.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h4>Para qué sirve cada tipo</h4>
+        <dl class="help-dl">
+          <dt>FPG</dt><dd>La caja de gráficos de DIV: varios mapas dentro de un solo
+          fichero. Es lo que cargan <code>load_fpg</code> y compañía.</dd>
+          <dt>MAP</dt><dd>Un gráfico suelto, el que se carga con <code>load_map</code>.
+          Puede ir aparte o dentro de un FPG.</dd>
+          <dt>PAL</dt><dd>Una paleta de 256 colores. La usan los gráficos de 8 bits.</dd>
+          <dt>FNT</dt><dd>Una fuente de 256 caracteres, la que usa <code>write</code>
+          para escribir texto.</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h4>El color transparente</h4>
+        <p>Igual que en DIV, el valor cero es transparente: el índice 0 en los recursos
+        de 8 bits y el valor 0 en los de 16 bits. Eso quiere decir que el negro puro
+        <code>0x0000</code> de un recurso de 16 bits no se ve —es el hueco por el que
+        asoma lo de debajo—; para pintar un negro que se note, elige un tono casi negro,
+        como <code>0x0001</code>.</p>
+      </section>
+
+      <section>
+        <h4>Trabajar con varios mapas</h4>
+        <p>La columna de la izquierda lista los mapas del FPG. En el inspector (pestaña
+        «Mapa») puedes cambiarles el nombre, el id y el tamaño, duplicarlos, trocear uno
+        grande en baldosas o juntarlos todos en un mapa del mural.</p>
+        <p>En la pestaña «Puntos» se editan los puntos de control: las marcas que DIV
+        consulta con <code>get_point</code> para saber por dónde va un sprite.</p>
+      </section>
+
+      <section>
+        <h4>Atajos de teclado</h4>
+        <table class="keys">
+          <tbody>
+            <tr><th>Ctrl+N</th><td>Nuevo recurso</td><th>Ctrl+O</th><td>Abrir</td></tr>
+            <tr><th>Ctrl+S</th><td>Guardar</td><th>Ctrl+Shift+S</th><td>Guardar como</td></tr>
+            <tr><th>Ctrl+Z</th><td>Deshacer</td><th>Ctrl+Y</th><td>Rehacer</td></tr>
+            <tr><th>Ctrl+C / X / V</th><td>Copiar, cortar, pegar</td><th>Ctrl+D</th><td>Duplicar la selección</td></tr>
+            <tr><th>Ctrl+A</th><td>Seleccionar todo</td><th>Supr</th><td>Borrar lo seleccionado</td></tr>
+            <tr><th>V P B E A F I</th><td>Ver, lápiz, pincel, goma, aerógrafo, bote, gotero</td><th>L R O</th><td>Línea, rectángulo, elipse</td></tr>
+            <tr><th>M Z C</th><td>Multilínea, bézier, multicurva</td><th>T D</th><td>Texto, difuminar</td></tr>
+            <tr><th>S</th><td>Selección</td><th>Intro</th><td>Anclar el trozo o cerrar el trazo</td></tr>
+            <tr><th>Esc</th><td>Cancelar</td><th>Shift+F2</th><td>Colocar puntos de control con el clic</td></tr>
+            <tr><th>K</th><td>Abrir el gráfico en una ventana aparte</td><th>G</th><td>Rejilla</td></tr>
+            <tr><th>U / X</th><td>Pintar con textura / ver la textura sobre el lienzo</td><th>+ / −</th><td>Zoom</td></tr>
+            <tr><th>Flechas</th><td>Cambiar de mapa</td><th>F1</th><td>Esta ayuda</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h4>Dos maneras de usarlo</h4>
+        <p>El editor funciona igual en el taller local y en la versión web. En la web los
+        ficheros no viven en una carpeta del equipo: los eliges con el diálogo del
+        navegador y, al guardar, se escriben donde le concedas permiso o se descargan.</p>
+      </section>
+
+    </div>
+    <footer>
+      <span class="hint">Vuelve a esta guía cuando quieras con F1.</span>
+      <span class="spacer"></span>
+      <button id="helpOk" class="btn">Entendido</button>
     </footer>
   </div>
 </div>

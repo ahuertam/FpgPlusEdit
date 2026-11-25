@@ -36,6 +36,27 @@ Se compone de cinco crates:
   sin `wasm-bindgen` ni pegamento generado.
 - **`div2fpg`** — herramienta de línea de comandos (usa `clap`).
 
+## Primeros pasos
+
+El editor se explica solo: el botón **«? Ayuda»** de la cabecera (o `F1`) abre una
+guía con lo esencial —qué es cada tipo de fichero, cómo empezar y los atajos—. El
+camino corto es este:
+
+1. **Abre un recurso.** «Abrir» o `Ctrl+O` para uno que ya tengas; «Examinar…»
+   lista la carpeta. También vale arrastrar el fichero sobre la ventana.
+2. **O crea uno.** «Nuevo…» o `Ctrl+N` abre un diálogo donde se elige el tipo
+   —FPG de 8 o 16 bits, MAP de 8 o 16 bits, PAL o FNT— y, cuando toca, el ancho,
+   el alto y el nombre del mapa. Un FPG nace con un primer mapa en blanco, listo
+   para pintar. Después se pide la ruta donde dejarlo.
+3. **Pinta.** Las herramientas están en la barra del lienzo (lápiz, pincel, goma,
+   formas, texto…); el color se toma de la paleta del dock inferior. El inspector
+   de la derecha ajusta el mapa, sus puntos de control y sus datos.
+4. **Guarda.** `Ctrl+S` escribe encima; `Ctrl+Shift+S` (`Guardar como…`) deja una
+   copia. `Ctrl+Z` y `Ctrl+Y` deshacen y rehacen.
+
+En la versión web el paso de la ruta lo sustituye el diálogo del navegador: se
+elige dónde se escribe y, tras el primer guardado, `Ctrl+S` ya no pregunta.
+
 ## Compilar
 
 Requiere una toolchain GNU de Rust. Con `cargo` en el PATH:
@@ -128,8 +149,8 @@ navegadores que no la tienen (Firefox, Safari) se recurre a un
 cual lo carga la página, se queda en modo web y hace contra el núcleo
 WebAssembly el mismo recorrido que haría alguien con el ratón: abrir
 `BRUSH.FPG`, mirar sus mapas, pintar un píxel, guardar, exportar un PNG, soltar
-un fichero y crear un FPG nuevo. Lo que más se vigila es que el fichero que
-sale vuelva a ser idéntico al que entró.
+un fichero y crear recursos nuevos de los cuatro tipos. Lo que más se vigila es
+que el fichero que sale vuelva a ser idéntico al que entró.
 
 ```
 cargo +stable-x86_64-pc-windows-gnu build --release --locked --target wasm32-unknown-unknown -p div2wasm
@@ -174,7 +195,9 @@ Qué permite hacer:
 - Navegar los fotogramas de los mapas animados y los glifos de las fuentes.
 - Importar imágenes (PNG, BMP, PCX, JPEG) como nuevos mapas de un FPG.
 - Exportar mapas y fotogramas a PNG, BMP, PCX y JPEG.
-- Crear FPG nuevos, guardar (conservando el GZIP original) y guardar como.
+- Crear recursos nuevos con un diálogo que pide tipo y medidas: FPG de 8 o 16
+  bits, MAP de 8 o 16 bits, PAL y FNT. Guardar (conservando el GZIP original) y
+  guardar como.
 
 La interfaz está en `web/` (`index.html`, `style.css`, `app.js` y `backend.js`),
 sin dependencias externas. `backend.js` es la pieza que decide entre servidor y

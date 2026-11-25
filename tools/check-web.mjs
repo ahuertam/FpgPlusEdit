@@ -148,7 +148,9 @@ console.log('\n== 2. abrir BRUSH.FPG con el selector del navegador ==');
 abrir('BRUSH.FPG');
 proximo = 'BRUSH.FPG';
 const elegido = await Backend.pickOpen({ exts: ['.fpg'], title: 'Abrir' });
-ok('el selector devuelve el nombre elegido', elegido === 'BRUSH.FPG', elegido);
+ok('el selector da una ruta lógica para el nombre elegido', elegido.endsWith('/BRUSH.FPG'), elegido);
+const elegido2 = await Backend.pickOpen({ exts: ['.fpg'], title: 'Abrir' });
+ok('dos ficheros con el mismo nombre no comparten ruta lógica', elegido2 !== elegido, `${elegido} / ${elegido2}`);
 
 const fpg = await Backend.api('/api/open', { path: elegido });
 ok('el FPG se abre', fpg.ok === true && fpg.kind === 'fpg', fpg.error);
@@ -192,7 +194,7 @@ ok('el píxel pintado se vuelve a leer', releidos[Y * ANCHO + X] === pintado, re
 console.log('\n== 5. guardar el MAP editado cambia un solo byte ==');
 proximo = null;
 const destino = await Backend.pickSave({ name: 'SALIDA.MAP', exts: ['.map'] });
-ok('el selector de guardado da un destino', destino === 'SALIDA.MAP', destino);
+ok('el selector de guardado da un destino', destino.endsWith('/SALIDA.MAP'), destino);
 await Backend.api('/api/save', { doc: mapa.doc, path: destino }, { method: 'POST' });
 
 const guardado = disco.get('SALIDA.MAP');
@@ -226,8 +228,13 @@ ok('el glifo llega como PNG', firma(glifo) === '137 80 78 71', firma(glifo));
 
 console.log('\n== 8. crear un FPG nuevo y volver a abrirlo ==');
 const nuevoNombre = await Backend.pickSave({ name: 'NUEVO.FPG', exts: ['.fpg'] });
-const nuevo = await Backend.api('/api/new', { path: nuevoNombre }, { method: 'POST' });
+const nuevo = await Backend.api('/api/new', {
+  path: nuevoNombre, kind: 'fpg', w: 32, h: 32,
+}, { method: 'POST' });
 ok('el FPG se crea', nuevo.ok === true && nuevo.kind === 'fpg', nuevo.error);
+ok('con un primer mapa del tamaño pedido',
+  nuevo.maps.length === 1 && nuevo.maps[0].width === 32 && nuevo.maps[0].height === 32,
+  nuevo.maps && nuevo.maps[0] && `${nuevo.maps[0].width}×${nuevo.maps[0].height}`);
 ok('y se ha escrito en el destino elegido', disco.has('NUEVO.FPG'));
 
 proximo = 'NUEVO.FPG';
@@ -245,6 +252,35 @@ ok('el MAP se crea', blanco.ok === true && blanco.kind === 'map', blanco.error);
 ok('sale con las medidas pedidas', blanco.width === 32 && blanco.height === 24,
   `${blanco.width}×${blanco.height}`);
 ok('y queda escrito en el destino', disco.has('BLANCO.MAP'));
+
+console.log('\n== 9b. el resto de tipos de «Nuevo»: PAL, FNT, 16 bits ==');
+const palDestino = await Backend.pickSave({ name: 'NUEVA.PAL', exts: ['.pal'] });
+const palNueva = await Backend.api('/api/new', { path: palDestino, kind: 'pal' }, { method: 'POST' });
+ok('la PAL en blanco se crea', palNueva.ok === true && palNueva.kind === 'pal', palNueva.error);
+ok('y queda escrita en el destino', disco.has('NUEVA.PAL'));
+
+const fntDestino = await Backend.pickSave({ name: 'NUEVA.FNT', exts: ['.fnt'] });
+const fntNueva = await Backend.api('/api/new', { path: fntDestino, kind: 'fnt' }, { method: 'POST' });
+ok('el FNT en blanco se crea', fntNueva.ok === true && fntNueva.kind === 'fnt', fntNueva.error);
+proximo = 'NUEVA.FNT';
+const fntReabierta = await Backend.api('/api/open', { path: await Backend.pickOpen({ exts: ['.fnt'] }) });
+ok('el FNT en blanco se vuelve a abrir', fntReabierta.ok === true && fntReabierta.kind === 'fnt',
+  fntReabierta.error);
+
+const f16Destino = await Backend.pickSave({ name: 'NUEVO16.F16', exts: ['.f16'] });
+const f16Nuevo = await Backend.api('/api/new', {
+  path: f16Destino, kind: 'f16', w: 16, h: 16,
+}, { method: 'POST' });
+ok('el FPG de 16 bits nace con su primer mapa',
+  f16Nuevo.ok === true && f16Nuevo.kind === 'fpg' && f16Nuevo.maps.length === 1, f16Nuevo.error);
+
+const m16Destino = await Backend.pickSave({ name: 'NUEVO16.M16', exts: ['.m16'] });
+const m16Nuevo = await Backend.api('/api/new', {
+  path: m16Destino, kind: 'm16', w: 16, h: 16,
+}, { method: 'POST' });
+ok('el MAP de 16 bits sale con sus medidas',
+  m16Nuevo.ok === true && m16Nuevo.kind === 'map' && m16Nuevo.width === 16 && m16Nuevo.height === 16,
+  m16Nuevo.error);
 
 console.log('\n== 10. duplicar y añadir mapas dentro de un FPG ==');
 const antesAdd = fpg.maps.length;

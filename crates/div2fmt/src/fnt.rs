@@ -74,6 +74,28 @@ impl Fnt {
         })
     }
 
+    /// Fuente en blanco: una paleta y los 256 caracteres sin glifo.
+    ///
+    /// Es el punto de partida de un FNT creado desde cero. Los descriptores
+    /// salen con ancho y alto cero, que es como DIV representa un carácter sin
+    /// dibujo, y el bloque de datos queda vacío hasta que se le añada algo.
+    pub fn new(palette: Palette) -> Fnt {
+        let glyphs = (0..FNT_GLYPHS)
+            .map(|_| FntGlyph {
+                width: 0,
+                height: 0,
+                v_offset: 0,
+                data_offset: FNT_DATA_OFFSET as u32,
+            })
+            .collect();
+        Fnt {
+            palette,
+            flags: 0,
+            glyphs,
+            data: Vec::new(),
+        }
+    }
+
     /// Serializa la fuente completa (round-trip byte a byte).
     pub fn write(&self) -> Vec<u8> {
         let mut out = Vec::new();

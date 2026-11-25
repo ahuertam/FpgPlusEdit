@@ -637,6 +637,140 @@ body.no-inspector .inspector { display: none; }
 .modal-box footer .extra { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-soft); flex: none; }
 .modal-box footer .extra[hidden] { display: none; }
 .modal-box footer .extra input { width: 88px; }
+.modal-box footer .spacer { flex: 1; }
+
+/* --- Diálogo de creación (Nuevo) --- */
+
+.modal-box.pick-box { width: min(640px, 94vw); height: auto; max-height: min(78vh, 640px); }
+
+.pick-body {
+  display: flex;
+  gap: 18px;
+  padding: 14px;
+  overflow: auto;
+  flex: 1;
+}
+
+.pick-kinds {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pick-kinds legend {
+  padding: 0 0 7px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.pick {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 9px;
+  align-items: center;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.pick:hover { background: var(--sel); }
+.pick input { grid-row: 1 / 3; margin: 0; accent-color: var(--accent); }
+.pick-name { font-size: 13px; }
+.pick-note { font-size: 11px; color: var(--ink-soft); }
+.pick input:checked ~ .pick-name { font-weight: 600; }
+
+.pick-side {
+  width: 214px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-left: 18px;
+  border-left: 1px solid var(--line-soft);
+}
+.pick-size { display: flex; gap: 9px; }
+.pick-size[hidden], .pick-name-field[hidden] { display: none; }
+.pick-size label,
+.pick-name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.pick-size input,
+.pick-name-field input {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+}
+.pick-size input:focus,
+.pick-name-field input:focus { outline: 2px solid var(--sel); border-color: var(--accent); }
+.pick-side .hint { flex: 1; }
+
+/* --- Guía de ayuda --- */
+
+.modal-box.help-box { width: min(780px, 94vw); height: min(84vh, 760px); }
+
+.help-body {
+  flex: 1;
+  overflow: auto;
+  padding: 2px 20px 16px;
+}
+.help-body section { padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.help-body section:last-child { border-bottom: 0; }
+.help-body h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--accent);
+  letter-spacing: .02em;
+}
+.help-body p { margin: 0 0 8px; }
+.help-body p:last-child { margin-bottom: 0; }
+.help-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--sel);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 7px; }
+
+.help-dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; }
+.help-dl dt { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.help-dl dd { margin: 0; color: var(--ink-soft); }
+
+table.keys { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.keys th,
+table.keys td { padding: 4px 8px; text-align: left; vertical-align: top; }
+table.keys th {
+  width: 1%;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  border-right: 1px solid var(--line-soft);
+}
+table.keys td { color: var(--ink-soft); }
+table.keys tr + tr th,
+table.keys tr + tr td { border-top: 1px solid var(--line-soft); }
+
+/* El botón de ayuda, en la cabecera: discreto pero siempre a mano. */
+.help-btn { font-family: var(--mono); font-size: 12px; }
 
 /* ---------------------------------------------------------------- avisos */
 
