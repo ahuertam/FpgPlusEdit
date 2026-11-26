@@ -189,3 +189,29 @@ fn fnt_help() {
     // Round-trip byte a byte.
     assert_eq!(fnt.write(), bytes);
 }
+
+/// 7. Los ejemplos que se reparten: el circuito se relee igual y conserva sus
+///    doce puntos de control.
+#[test]
+fn ejemplo_circuito() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ejemplos/DIV/ejemplo.fpg");
+    let bytes = std::fs::read(&path).unwrap();
+    let fpg = Fpg::read(&bytes).unwrap();
+
+    assert_eq!(fpg.depth, 8);
+    assert_eq!(fpg.maps.len(), 4);
+    assert_eq!(fpg.maps[0].name(), "Circuito");
+    assert_eq!((fpg.maps[0].width, fpg.maps[0].height), (320, 200));
+    assert_eq!(fpg.maps[0].points.len(), 12, "el circuito lleva doce puntos");
+    assert_eq!(fpg.maps[1].name(), "Triangulo");
+
+    // Y al reescribirlo sale idéntico byte a byte, como cualquier FPG.
+    assert_eq!(fpg.write(), bytes);
+
+    // La paleta suelta también.
+    let pal_bytes =
+        std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ejemplos/DIV/ejemplo.pal"))
+            .unwrap();
+    let pal = Palette::read_pal_file(&pal_bytes).unwrap();
+    assert_eq!(pal.write_pal_file(), pal_bytes);
+}

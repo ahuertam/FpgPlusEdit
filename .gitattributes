@@ -1,0 +1,4 @@
+# Los programas de DIV son ficheros de DOS: ASCII con finales de linea CRLF.
+# Sin esto, un `core.autocrlf` en un Windows los convertiria a LF al
+# guardarlos y DIV no los leeria bien.
+ejemplos/DIV/*.prg -text

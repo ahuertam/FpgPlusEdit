@@ -64,6 +64,12 @@ foreach ($file in $files) {
     Copy-Item $file.Src $file.Dst -Force
 }
 
+# Las capturas que usa el README, para que sus enlaces funcionen en el paquete.
+$docsSrc = Join-Path $root "docs"
+if (Test-Path $docsSrc) {
+    Copy-Item $docsSrc -Destination $outDir -Recurse -Force
+}
+
 $hashLines = Get-ChildItem $outDir -Recurse -File |
     Sort-Object FullName |
     ForEach-Object {
