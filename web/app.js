@@ -85,6 +85,33 @@ function toast(msg, bad) {
   toastTimer = setTimeout(() => t.classList.remove('on'), bad ? 6000 : 2600);
 }
 
+/* ---------------------------------------------------------------- modales */
+
+let focoAntes = null;
+
+/** Abre un modal: el fondo deja de ser alcanzable y el foco entra dentro.
+    `focoSel` dice dónde empezar; si no, se coge el primer control del diálogo. */
+function modalAbierto(sel, focoSel) {
+  focoAntes = document.activeElement;
+  for (const el of document.querySelectorAll('body > *:not(.modal)')) el.inert = true;
+  const m = $(sel);
+  m.hidden = false;
+  const dest = focoSel ? m.querySelector(focoSel) : m.querySelector('button, input, [tabindex]');
+  if (dest) dest.focus();
+}
+
+/** Cierra un modal y devuelve el foco a quien lo abrió. */
+function modalCerrado(sel) {
+  $(sel).hidden = true;
+  // Solo se suelta el fondo si no queda ningún otro modal abierto.
+  if (!document.querySelector('.modal:not([hidden])')) {
+    for (const el of document.querySelectorAll('body > *:not(.modal)')) el.inert = false;
+  }
+  const v = focoAntes;
+  focoAntes = null;
+  if (v && v.isConnected && !v.disabled) v.focus();
+}
+
 function fmtSize(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
@@ -178,6 +205,12 @@ async function dialogGo(dir) {
       $('mPath2').value = e.path;
       if (dialog.mode === 'open') confirmDialog();
     };
+    // También se llega a la lista con el teclado, no solo con el ratón.
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
+    li.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); li.click(); }
+    };
     list.append(li);
   }
 }
@@ -195,12 +228,12 @@ function openDialog(cfg) {
     $('mExtraLabel').textContent = cfg.extra.label;
     $('mExtra').value = cfg.extra.value || '';
   }
-  $('modal').hidden = false;
+  modalAbierto('modal', '#mPath2');
   dialogGo(cfg.dir || currentDir());
 }
 
 function closeDialog() {
-  $('modal').hidden = true;
+  modalCerrado('modal');
   dialog.onPick = null;
 }
 
@@ -342,6 +375,7 @@ function applyDoc(j, opts) {
   }
 
   state.doc = j.doc;
+  document.body.classList.add('has-doc');
   state.kind = j.kind;
   state.info = j;
   state.dropped = !!j.dropped;
@@ -468,6 +502,9 @@ async function fillThumb(img, id) {
 
 function renderMaps() {
   const list = $('mapList');
+  // La lista se rehace entera, así que quien estuviera con el foco en una
+  // miniatura se quedaría sin él: se le devuelve al terminar.
+  const teniaFoco = list.contains(document.activeElement);
   list.innerHTML = '';
   $('mapsCount').textContent = state.maps.length ? `(${state.maps.length})` : '';
 
@@ -495,11 +532,23 @@ function renderMaps() {
 
     li.append(img, box);
     li.onclick = () => selectMap(m.id);
+    // La miniatura es un botón para quien no usa el ratón: con Enter o
+    // espacio se elige, y con las flechas se recorre la lista.
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
+    li.setAttribute('aria-label', `${nombreMapa(m)}, ${m.width}×${m.height}`);
+    li.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); selectMap(m.id); }
+    };
     list.append(li);
   }
   // La lista de texturas sigue a la de mapas: si se añade, se borra o se
   // renombra uno, aquí tiene que enterarse.
   renderBrush();
+  if (teniaFoco) {
+    const sel = list.querySelector('li.sel') || list.children[0];
+    if (sel) sel.focus();
+  }
 }
 
 function selectMap(id) {
@@ -514,6 +563,27 @@ function selectMap(id) {
   renderProps();
   renderToolbar();
   loadCanvas();
+  describeLienzo();
+}
+
+/** Lo que hay en el lienzo, en una frase, para quien no ve la pantalla. */
+function describeLienzo() {
+  const cv = $('view');
+  const m = currentMap();
+  const tool = document.querySelector('.tool.on');
+  const txt = m
+    ? `${nombreMapa(m)}, ${m.width}×${m.height}` +
+      `${tool ? `, herramienta ${tool.textContent}` : ''}`
+    : state.kind === 'pal'
+      ? 'Paleta de 256 colores'
+      : 'Lienzo de edición, vacío';
+  if (cv.getAttribute('aria-label') !== txt) cv.setAttribute('aria-label', txt);
+}
+
+/** Cómo se llama un mapa de cara a quien no ve la pantalla. */
+function nombreMapa(m) {
+  const n = (m.name || '').trim();
+  return n ? `${n} (id ${m.id})` : `Mapa ${m.id}`;
 }
 
 /* ------------------------------------------------------------------ lienzo */
@@ -2086,6 +2156,7 @@ function renderPaint() {
   const punteando = hasBuf && !state.pickPoint;
   cv.classList.toggle('painting', punteando && (pintan.includes(state.tool) || isPathTool(state.tool) || state.tool === 'text'));
   cv.classList.toggle('selecting', punteando && state.tool === 'select');
+  describeLienzo();
 }
 
 function resetPaintState() {
@@ -3210,7 +3281,7 @@ const newKind = () => (document.querySelector('input[name="newKind"]:checked') |
 function newDialog() {
   for (const r of document.querySelectorAll('input[name="newKind"]')) r.checked = r.value === 'fpg';
   $('newName').value = '';
-  $('newModal').hidden = false;
+  modalAbierto('newModal', 'input[name="newKind"]');
   newKindChanged();
 }
 
@@ -3223,7 +3294,7 @@ function newKindChanged() {
 }
 
 function closeNewDialog() {
-  $('newModal').hidden = true;
+  modalCerrado('newModal');
 }
 
 /** Recoge lo elegido y pide el destino: primero se sabe el qué, luego el dónde. */
@@ -3271,8 +3342,8 @@ async function createFile(p, opts) {
 
 /* ------------------------------------------------------------- la ayuda */
 
-function openHelp() { $('helpModal').hidden = false; }
-function closeHelp() { $('helpModal').hidden = true; }
+function openHelp() { modalAbierto('helpModal', '.help-box'); }
+function closeHelp() { modalCerrado('helpModal'); }
 function toggleHelp() { $('helpModal').hidden ? openHelp() : closeHelp(); }
 
 /* --------------------------------------------------------------- arranque */
@@ -3362,6 +3433,9 @@ function saveAsDialog() {
   });
 }
 
+/** `true` si hay algún modal a la vista. */
+const modalVisible = () => !!document.querySelector('.modal:not([hidden])');
+
 /** Atajos de teclado. Se ignoran mientras se escribe en un campo. */
 function onKey(ev) {
   const tag = (ev.target.tagName || '').toLowerCase();
@@ -3379,10 +3453,20 @@ function onKey(ev) {
   }
 
   // La ayuda es lo primero que se ofrece en un editor: siempre a mano con F1.
-  if (ev.key === 'F1') { ev.preventDefault(); toggleHelp(); return; }
+  // Con otro modal abierto, F1 no apila la ayuda encima.
+  if (ev.key === 'F1') {
+    ev.preventDefault();
+    const abiertos = document.querySelectorAll('.modal:not([hidden])').length;
+    if (abiertos === 0) openHelp();
+    else if (abiertos === 1 && !$('helpModal').hidden) closeHelp();
+    return;
+  }
 
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
     const k = ev.key.toLowerCase();
+    // Con un modal abierto, los atajos que abrirían otro encima no cuentan:
+    // dos diálogos a la vez dejan el velo y el foco en un estado confuso.
+    if (modalVisible() && (k === 'o' || k === 'n' || (k === 's' && ev.shiftKey))) return;
     if (k === 's') { ev.preventDefault(); ev.shiftKey ? saveAsDialog() : saveDoc(null); return; }
     if (k === 'o') { ev.preventDefault(); openFileDialog(); return; }
     if (k === 'n') { ev.preventDefault(); newDialog(); return; }
@@ -3398,7 +3482,11 @@ function onKey(ev) {
 
   if (escribiendo) return;
 
-  if (state.buf && $('modal').hidden) {
+  // Con un modal abierto, los atajos de edición no cuentan: actuarían sobre
+  // el lienzo que hay detrás del diálogo.
+  if (modalVisible()) return;
+
+  if (state.buf) {
     // Shift+F2 es la tecla de los puntos de control en el editor de DIV.
     if (ev.key === 'F2' && ev.shiftKey) {
       ev.preventDefault();

@@ -155,7 +155,7 @@
     </div>
 
     <div class="stage" id="stage">
-      <canvas id="view" width="16" height="16"></canvas>
+      <canvas id="view" width="16" height="16" role="img" aria-label="Lienzo de edición, vacío"></canvas>
       <p class="empty" id="emptyMsg">Abre un <b>FPG</b>, <b>MAP</b>, <b>PAL</b> o <b>FNT</b> para empezar.</p>
     </div>
   </section>
@@ -283,7 +283,7 @@
 
 <!-- Diálogo de fichero (abrir, guardar como, exportar, importar, nuevo) -->
 <div class="modal" id="modal" hidden>
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <header>
       <h3 id="modalTitle">Abrir fichero</h3>
       <button id="modalClose" class="mini">✕</button>
@@ -306,9 +306,9 @@
 
 <!-- Diálogo de creación: elige qué recurso se crea y con qué medidas -->
 <div class="modal" id="newModal" hidden>
-  <div class="modal-box pick-box">
+  <div class="modal-box pick-box" role="dialog" aria-modal="true" aria-labelledby="newTitle">
     <header>
-      <h3>Nuevo recurso</h3>
+      <h3 id="newTitle">Nuevo recurso</h3>
       <button id="newClose" class="mini" title="Cancelar (Esc)">✕</button>
     </header>
     <div class="pick-body">
@@ -367,9 +367,9 @@
 
 <!-- Guía de primeros pasos y atajos (botón «? Ayuda» o F1) -->
 <div class="modal" id="helpModal" hidden>
-  <div class="modal-box help-box">
+  <div class="modal-box help-box" role="dialog" aria-modal="true" aria-labelledby="helpTitle" tabindex="-1">
     <header>
-      <h3>Ayuda y primeros pasos</h3>
+      <h3 id="helpTitle">Ayuda y primeros pasos</h3>
       <button id="helpClose" class="mini" title="Cerrar (Esc)">✕</button>
     </header>
     <div class="help-body">
