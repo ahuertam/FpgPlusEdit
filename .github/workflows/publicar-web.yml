@@ -1,0 +1,59 @@
+# Publica la versión web del editor en GitHub Pages.
+#
+# La carpeta que se sube es estática: el núcleo de edición va dentro, en
+# div2wasm.wasm, así que los ficheros que abre el visitante se quedan en su
+# navegador y no pasan por ningún servidor.
+#
+# Para activarlo hay que hacer una cosa en el repositorio, una sola vez:
+# Settings → Pages → Build and deployment → Source → «GitHub Actions».
+
+name: Publicar la versión web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Un despliegue a la vez: si llega otro commit, cancela el que esté en curso.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.desploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust y el destino de WebAssembly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Compilar el núcleo y preparar la carpeta
+        run: |
+          cargo build --release --locked --target wasm32-unknown-unknown -p div2wasm
+          mkdir -p public
+          cp web/index.html web/style.css web/app.js web/backend.js public/
+          cp target/wasm32-unknown-unknown/release/div2wasm.wasm public/
+          cp LICENSE public/
+
+      - name: Configurar Pages
+        uses: actions/configure-pages@v5
+
+      - name: Subir la carpeta
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Publicar
+        id: deploy
+        uses: actions/deploy-pages@v4
